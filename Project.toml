@@ -1,0 +1,13 @@
+name = "Eeloo"
+uuid = "cd7b33ae-7fac-45d2-9517-7fd8367982fc"
+authors = ["AntonOresten <antonoresten@proton.me> and contributors"]
+version = "1.0.0-DEV"
+
+[compat]
+julia = "1.10"
+
+[extras]
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[targets]
+test = ["Test"]

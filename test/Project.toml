@@ -1,3 +1,13 @@
 [deps]
-Eeloo = "cd7b33ae-7fac-45d2-9517-7fd8367982fc"
+BFloat16s = "ab4f0b2a-ad5b-11e8-123f-65d77653426b"
+NNlib = "872c559c-99b0-510c-b3b7-b6c96a88d5cd"
+SpecialFunctions = "276daf66-3868-5448-9aa4-cd146d93841b"
+Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
+CUDACore = "bd0ed864-bdfe-4181-a5ed-ce625a5fdea2"
+Stiletto = "cd7b33ae-7fac-45d2-9517-7fd8367982fc"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+cuDNN = "02a925ec-e4fe-4b08-9a7e-0d78e3d38ccd"
+
+[sources]
+CUDACore = {url = "https://github.com/JuliaGPU/CUDA.jl", rev = "main", subdir = "CUDACore"}
+cuDNN = {url = "https://github.com/AntonOresten/CUDA.jl", rev = "stiletto-dev", subdir = "lib/cudnn"}

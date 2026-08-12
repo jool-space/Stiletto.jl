@@ -1,14 +1,14 @@
-using Eeloo
+using Stiletto
 using Documenter
 
-DocMeta.setdocmeta!(Eeloo, :DocTestSetup, :(using Eeloo); recursive=true)
+DocMeta.setdocmeta!(Stiletto, :DocTestSetup, :(using Stiletto); recursive=true)
 
 makedocs(;
-    modules=[Eeloo],
+    modules=[Stiletto],
     authors="AntonOresten <antonoresten@proton.me> and contributors",
-    sitename="Eeloo.jl",
+    sitename="Stiletto.jl",
     format=Documenter.HTML(;
-        canonical="https://docs.jool.space/Eeloo.jl",
+        canonical="https://docs.jool.space/Stiletto.jl",
         edit_link="main",
         assets=String[],
     ),
@@ -18,8 +18,8 @@ makedocs(;
 )
 
 deploydocs(;
-    repo="github.com/jool-space/Eeloo.jl",
+    repo="github.com/jool-space/Stiletto.jl",
     deploy_repo="github.com/jool-space/docs",
     devbranch="main",
-    dirname="Eeloo.jl",
+    dirname="Stiletto.jl",
 )

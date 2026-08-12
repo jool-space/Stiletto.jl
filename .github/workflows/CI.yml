@@ -75,6 +75,6 @@ jobs:
         shell: julia --project=docs --color=yes {0}
         run: |
           using Documenter: DocMeta, doctest
-          using Eeloo
-          DocMeta.setdocmeta!(Eeloo, :DocTestSetup, :(using Eeloo); recursive=true)
-          doctest(Eeloo)
+          using Stiletto
+          DocMeta.setdocmeta!(Stiletto, :DocTestSetup, :(using Stiletto); recursive=true)
+          doctest(Stiletto)

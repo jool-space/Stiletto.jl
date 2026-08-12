@@ -1,14 +1,14 @@
 ```@meta
-CurrentModule = Eeloo
+CurrentModule = Stiletto
 ```
 
-# Eeloo
+# Stiletto
 
-Documentation for [Eeloo](https://github.com/jool-space/Eeloo.jl).
+Documentation for [Stiletto](https://github.com/jool-space/Stiletto.jl).
 
 ```@index
 ```
 
 ```@autodocs
-Modules = [Eeloo]
+Modules = [Stiletto]
 ```

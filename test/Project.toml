@@ -11,3 +11,6 @@ cuDNN = "02a925ec-e4fe-4b08-9a7e-0d78e3d38ccd"
 [sources]
 CUDACore = {url = "https://github.com/JuliaGPU/CUDA.jl", rev = "main", subdir = "CUDACore"}
 cuDNN = {url = "https://github.com/AntonOresten/CUDA.jl", rev = "stiletto-dev", subdir = "lib/cudnn"}
+
+[compat]
+Statistics = "1.11.1"

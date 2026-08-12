@@ -1,3 +1,6 @@
 [deps]
 Documenter = "e30172f5-a6a5-5a46-863b-614d45cd2de4"
 Stiletto = "cd7b33ae-7fac-45d2-9517-7fd8367982fc"
+
+[compat]
+Documenter = "1.17.0"

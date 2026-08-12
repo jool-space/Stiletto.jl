@@ -8,7 +8,7 @@ makedocs(;
     authors="AntonOresten <antonoresten@proton.me> and contributors",
     sitename="Eeloo.jl",
     format=Documenter.HTML(;
-        canonical="https://jool-space.github.io/Eeloo.jl",
+        canonical="https://docs.jool.space/Eeloo.jl",
         edit_link="main",
         assets=String[],
     ),
@@ -19,5 +19,7 @@ makedocs(;
 
 deploydocs(;
     repo="github.com/jool-space/Eeloo.jl",
+    deploy_repo="github.com/jool-space/docs",
     devbranch="main",
+    dirname="Eeloo.jl",
 )

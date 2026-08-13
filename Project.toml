@@ -27,5 +27,6 @@ cuDNN = {url = "https://github.com/AntonOresten/CUDA.jl", rev = "stiletto-dev", 
 [compat]
 NNlib = "0.9.43"
 SpecialFunctions = "2"
+Statistics = "1.11.1"
 cuDNN = "6.2"
 julia = "1.11"

@@ -14,4 +14,5 @@ CUDACore = {url = "https://github.com/JuliaGPU/CUDA.jl", rev = "main", subdir = 
 cuDNN = {url = "https://github.com/AntonOresten/CUDA.jl", rev = "stiletto-dev", subdir = "lib/cudnn"}
 
 [compat]
+BFloat16s = "0.6.1"
 SpecialFunctions = "2.8.3"

@@ -22,7 +22,7 @@ SpecialFunctionsExt = "SpecialFunctions"
 
 [sources]
 CUDACore = {url = "https://github.com/JuliaGPU/CUDA.jl", rev = "main", subdir = "CUDACore"}
-cuDNN = {url = "https://github.com/AntonOresten/CUDA.jl", rev = "stiletto-dev", subdir = "lib/cudnn"}
+cuDNN = {url = "https://github.com/JuliaGPU/CUDA.jl", rev = "main", subdir = "lib/cudnn"}
 
 [compat]
 NNlib = "0.9.43"

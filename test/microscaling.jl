@@ -8,6 +8,9 @@
 using Microscaling: BlockscaledArray, Sm1xxArray, sm1xx, elements, scales,
     Float8_E4M3FN, Float8_E5M2, Float8_E8M0FNU, Float4_E2M1FN
 using BitPacking: NarrowArray
+using cuDNN: Graph, tensor!, scalar!, output!, matmul!, pointwise!, reduction!,
+    block_scale_dequantize!, execute!, is_supported,
+    CUDNN_TENSOR_REORDERING_F8_128x4
 
 # test-owned reference: expand each scale over its block of elements
 dequant_ref(e, s, block) =
@@ -193,4 +196,154 @@ end
                                            D, W, X)
 end
 
+@testset "block-scaled transformer block" begin
+    # the serving composition: fp8 QKV projections (quantized weights ×
+    # quantized activations), fp16 attention, dense out-projection — chained
+    # jits sharing stable buffers, one plan per distinct signature
+    Scale, Element, blk = Float8_E8M0FNU, Float8_E4M3FN, 32
+    dh, hh, s, b = 64, 4, 32, 4   # s·b ≥ 128: the scale swizzle tiles 128 wide
+    D, N = dh * hh, s * b
+    quantized(dims...) = BlockscaledArray(
+        sm1xx(CuArray(Scale.(rand(Float32, dims[1] ÷ blk, dims[2:end]...) / √D))),
+        CuArray(Element.(randn(Float32, dims...))))
+    Wq, Wk, Wv, X = quantized(D, D), quantized(D, D), quantized(D, D), quantized(D, N)
+    Wo = CuArray(randn(Float16, D, D) ./ √Float16(D))
+    qb, kb, vb, y = (CuArray(zeros(Float16, D, N)) for _ in 1:4)
+    O = CuArray(zeros(Float16, dh, hh, s, b))
+
+    # the Sm1xxArray broadcast linearizes the swizzled scales to logical shape
+    dq(A) = dequant_ref(Array(elements(A)), Array(Float32.(scales(A))), blk)
+
+    proj!(d, w, x) = (d .= w' * x; nothing)
+    out!(y, w, o) = (mul!(y, w', o); nothing)
+    heads(a) = reshape(a, dh, hh, s, b)
+    function block!()
+        jit(proj!, qb, Wq, X); jit(proj!, kb, Wk, X); jit(proj!, vb, Wv, X)
+        Stiletto.attention!(O, heads(qb), heads(kb), heads(vb))
+        jit(out!, y, Wo, reshape(O, D, N))
+        return nothing
+    end
+    nplans = length(cuDNN.handle().plans)
+    block!()
+    # three projections share one plan (same signature, rebinding)
+    @test length(cuDNN.handle().plans) <= nplans + 3
+
+    Wq32, Wk32, Wv32, X32 = dq(Wq), dq(Wk), dq(Wv), dq(X)
+    o_ref = ref_attention(reshape(Wq32' * X32, dh, hh, s, b),
+                          reshape(Wk32' * X32, dh, hh, s, b),
+                          reshape(Wv32' * X32, dh, hh, s, b);
+                          scale=inv(sqrt(Float32(dh))))
+    y_ref = Float32.(Array(Wo))' * reshape(o_ref, D, N)
+    @test Float32.(Array(y)) ≈ y_ref rtol=5e-2 atol=5e-2
+
+    # the whole block replays under CUDA graph capture: quantized matmuls,
+    # attention, and dense matmul are all just stream work
+    graph = CUDACore.capture(throw_error=false) do
+        block!()
+    end
+    if graph === nothing
+        @test_skip false
+    else
+        exec = CUDACore.instantiate(graph)
+        fill!(y, Float16(0))
+        CUDACore.launch(exec)
+        CUDACore.synchronize()
+        @test Float32.(Array(y)) ≈ y_ref rtol=5e-2 atol=5e-2
+    end
+
+    # note: block-scaled attention inputs (cuDNN's MXFP8 attention recipe)
+    # are constructible — BHSD storage puts the sequence axis on sm1xx's
+    # 128-tile dimension, presented head-major — and dequant→SDPA graphs
+    # finalize with those strides, but no engine takes them on sm_121/9.24
+    # in any mode probed; the frontend recipe lowers to a composed fMHA
+    # graph these bindings don't build. Quantized attention inputs go
+    # through the projection chain instead. (See TODO.md for the probe
+    # record; the composed graph itself is tested below.)
+end
+
+end
+
+@testset "MXFP8 attention (composed fMHA)" begin
+    # cudnn-frontend's MXFP8 SDPA recipe, mirrored op for op from its node
+    # expansion: block-scale-dequantize Q/K/V before the BMMs, composed
+    # softmax, P quantized at fixed scale 256 by typing the pointwise output
+    # E4M3 (cast-by-dtype), no post-descale. NVIDIA gates the recipe to
+    # cuDNN ≥ 9.21 on Blackwell Data Center (CC 10.x) — GB10 (CC 12.x) is
+    # excluded — so support is CLAIMED there and the numerics have never run
+    # anywhere yet: the first execution on CC 10 hardware is the arbiter.
+    Scale, Element, blk = Float8_E8M0FNU, Float8_E4M3FN, 32
+    d, hh, s, b = 128, 4, 256, 2      # tile-exact: d/32 = 4, s multiple of 128
+    ds, dsh = d * s, d * s * hh
+    sc = d ÷ blk
+
+    # V's column-wise scales need the generalized check_swizzled_scale_dims
+    # (branch cudnn-blockscale-check); broken until the resolved cuDNN has it
+    built = try
+    g = Graph(io_dtype=Float16, intermediate_dtype=Float32, compute_dtype=Float32)
+    # BHSD storage (d, s, h, b); Q and V presented (s, d, h, b), K natural
+    qe = tensor!(g; dims=(s, d, hh, b), strides=(d, 1, ds, dsh), dtype=Element, name="Q")
+    qs = tensor!(g; dims=(s, sc, hh, b), strides=(sc, 1, sc * s, sc * s * hh),
+                 dtype=Scale, name="Q.scale", reordering=CUDNN_TENSOR_REORDERING_F8_128x4)
+    ke = tensor!(g; dims=(d, s, hh, b), strides=(1, d, ds, dsh), dtype=Element, name="K")
+    ks = tensor!(g; dims=(sc, s, hh, b), strides=(1, sc, sc * s, sc * s * hh),
+                 dtype=Scale, name="K.scale", reordering=CUDNN_TENSOR_REORDERING_F8_128x4)
+    ve = tensor!(g; dims=(s, d, hh, b), strides=(d, 1, ds, dsh), dtype=Element, name="V")
+    vs = tensor!(g; dims=(s ÷ blk, d, hh, b),
+                 strides=(d, 1, d * (s ÷ blk), d * (s ÷ blk) * hh),
+                 dtype=Scale, name="V.scale", reordering=CUDNN_TENSOR_REORDERING_F8_128x4)
+
+    qd = block_scale_dequantize!(g, qe, qs; block_size=blk, name="Qd")
+    kd = block_scale_dequantize!(g, ke, ks; block_size=blk, name="Kd")
+    vd = block_scale_dequantize!(g, ve, vs; block_size=blk, name="Vd")
+    S = matmul!(g, qd, kd; name="bmm1")
+    attn_scale = scalar!(g, Float32; rank=4, name="AttnScale")
+    Ss = pointwise!(g, :mul, S, attn_scale; name="scaled")
+    m = reduction!(g, :max, Ss; dims=2, name="rowmax")
+    e = pointwise!(g, :exp, pointwise!(g, :sub, Ss, m; name="centered"); name="expS")
+    z = reduction!(g, :add, e; dims=2, name="rowsum")
+    P = pointwise!(g, :div, e, z; name="softmax")
+    scale_s = scalar!(g, Float32; rank=4, name="ScaleS")
+    Pq = tensor!(g; dims=P.dims, dtype=Element, virtual=true, name="Pq")
+    pointwise!(g, :mul, P, scale_s; y=Pq)
+    O = tensor!(g; dims=(s, d, hh, b), dtype=Float16, output=true, name="O")
+    matmul!(g, Pq, vd; c=O)
+    (; g, qe, qs, ke, ks, ve, vs, attn_scale, scale_s, O)
+    catch err
+        err isa DimensionMismatch || rethrow()
+        nothing
+    end
+
+    cc = CUDACore.capability(CUDACore.device())
+    mxfp8_sdpa_claimed = cc.major == 10 && cuDNN.version() >= v"9.21"
+    if built === nothing
+        @test_broken false
+    else
+    (; g, qe, qs, ke, ks, ve, vs, attn_scale, scale_s, O) = built
+    if !is_supported(g)
+        @test !mxfp8_sdpa_claimed   # vendor-documented on CC 10: fail loudly there
+        @test_skip mxfp8_sdpa_claimed
+    else
+        qeh, keh, veh = (Element.(randn(Float32, d, s, hh, b)) for _ in 1:3)
+        qsh, ksh = (Scale.(rand(Float32, sc, s, hh, b) / √d) for _ in 1:2)
+        vsh = Scale.(rand(Float32, s ÷ blk, d, hh, b) / √d)
+        Oa = CuArray(zeros(Float16, s, d, hh, b))
+        execute!(g, qe => CuArray(qeh), qs => sm1xx(CuArray(qsh)),
+                    ke => CuArray(keh), ks => sm1xx(CuArray(ksh)),
+                    ve => CuArray(veh), vs => sm1xx(CuArray(vsh)),
+                    attn_scale => inv(sqrt(Float32(d))), scale_s => 256f0, O => Oa)
+        # reference with the fixed-256 fp8 P model
+        dq4(el, sf, bdim) = Float32.(el) .*
+            repeat(Float32.(sf); inner=ntuple(i -> i == bdim ? blk : 1, 4))
+        Qd = dq4(qeh, qsh, 1)
+        Kd = dq4(keh, ksh, 1)
+        Vd = dq4(veh, permutedims(vsh, (2, 1, 3, 4)), 2)
+        for bi in 1:b, hi in 1:hh
+            Sm = inv(sqrt(Float32(d))) .* (Qd[:, :, hi, bi]' * Kd[:, :, hi, bi])
+            Pm = mapslices(r -> (w = exp.(r .- maximum(r)); w ./ sum(w)), Sm; dims=2)
+            Pf = Float32.(Element.(256f0 .* Pm))
+            @test Float32.(Array(@view Oa[:, :, hi, bi])) ≈
+                  Pf * Vd[:, :, hi, bi]' rtol=6e-2 atol=6e-2
+        end
+    end
+    end
 end

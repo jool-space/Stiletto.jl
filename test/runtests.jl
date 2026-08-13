@@ -39,6 +39,21 @@ function ref_batchnorm(x, s, b, m, iv)
     cd = ntuple(i -> i == ndims(x) - 1 ? size(x, ndims(x) - 1) : 1, ndims(x))
     return reshape(s, cd) .* (x .- reshape(m, cd)) .* reshape(iv, cd) .+ reshape(b, cd)
 end
+function ref_attention(q, k, v; scale, causal=false)  # (d, h, s, b); causal assumes sq == skv
+    d, h, sq, b = size(q)
+    skv, hk = size(k, 3), size(k, 2)
+    q32, k32, v32 = Float32.(q), Float32.(k), Float32.(v)
+    o = zeros(Float32, d, h, sq, b)
+    for bi in 1:b, hi in 1:h, i in 1:sq
+        hkv = fld1(hi, h ÷ hk)
+        s = [scale * sum(@view(q32[:, hi, i, bi]) .* @view(k32[:, hkv, j, bi]))
+             for j in 1:skv]
+        causal && (s[i+1:end] .= -Inf32)
+        p = exp.(s .- maximum(s)); p ./= sum(p)
+        o[:, hi, i, bi] = @view(v32[:, hkv, :, bi]) * p
+    end
+    return o
+end
 
 @testset "Stiletto" begin
 
@@ -221,6 +236,58 @@ end
             @test Array(c4(cargs...)) ≈ ref rtol=1e-3 atol=1e-3
         end
     end
+end
+
+@testset "attention" begin
+    d, h, s, b = 64, 4, 32, 2
+    qh, kh, vh = (randn(Float16, d, h, s, b) for _ in 1:3)
+    Q, K, V = CuArray.((qh, kh, vh))
+    scale = inv(sqrt(Float32(d)))
+    ref = ref_attention(qh, kh, vh; scale)
+
+    c = compile((q, k, v) -> Stiletto.attention(q, k, v), Q, K, V)
+    o = c(Q, K, V)
+    @test eltype(o) == Float16   # attention output follows q's dtype
+    @test Float32.(Array(o)) ≈ ref rtol=2e-2 atol=2e-2
+
+    # causal mask baked into the graph; custom scale bound by value
+    cc = compile((q, k, v) -> Stiletto.attention(q, k, v; causal=true, scale=0.5f0), Q, K, V)
+    @test Float32.(Array(cc(Q, K, V))) ≈
+          ref_attention(qh, kh, vh; scale=0.5f0, causal=true) rtol=2e-2 atol=2e-2
+
+    # eager tiers: allocating and mutating, cached per signature
+    @test Float32.(Array(Stiletto.attention(Q, K, V))) ≈ ref rtol=2e-2 atol=2e-2
+    O = CuArray(zeros(Float16, d, h, s, b))
+    @test Stiletto.attention!(O, Q, K, V) === O
+    @test Float32.(Array(O)) ≈ ref rtol=2e-2 atol=2e-2
+    nplans = length(cuDNN.handle().plans)
+    Stiletto.attention!(O, Q, K, V)
+    @test length(cuDNN.handle().plans) == nplans
+
+    # captured k/v close over the trace like any array
+    ck = compile(q -> Stiletto.attention(q, K, V), Q)
+    @test Float32.(Array(ck(Q))) ≈ ref rtol=2e-2 atol=2e-2
+
+    # cross-attention: kv sequence length independent of q's
+    kx, vx = randn(Float16, d, h, 16, b), randn(Float16, d, h, 16, b)
+    cx = compile((q, k, v) -> Stiletto.attention(q, k, v), Q, CuArray(kx), CuArray(vx))
+    @test Float32.(Array(cx(Q, CuArray(kx), CuArray(vx)))) ≈
+          ref_attention(qh, kx, vx; scale) rtol=2e-2 atol=2e-2
+
+    # grouped-query attention: k/v heads divide q's, output follows q
+    kg, vg = randn(Float16, d, 2, s, b), randn(Float16, d, 2, s, b)
+    cg = compile((q, k, v) -> Stiletto.attention(q, k, v), Q, CuArray(kg), CuArray(vg))
+    @test Float32.(Array(cg(Q, CuArray(kg), CuArray(vg)))) ≈
+          ref_attention(qh, kg, vg; scale) rtol=2e-2 atol=2e-2
+
+    # shape contracts surface at trace time
+    @test_throws ArgumentError compile((q, k, v) -> Stiletto.attention(q, k, v),
+                                       CuArray(randn(Float16, d, h, s)), K, V)
+    @test_throws DimensionMismatch compile((q, k, v) -> Stiletto.attention(q, k, v),
+                                           Q, CuArray(randn(Float16, d, 3, s, b)),
+                                           CuArray(randn(Float16, d, 3, s, b)))
+    @test_throws DimensionMismatch compile((q, k, v) -> Stiletto.attention(q, k, v),
+                                           Q, CuArray(randn(Float16, d, h, 16, b)), V)
 end
 
 @testset "reshape" begin

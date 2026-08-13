@@ -8,7 +8,7 @@ bindable(a::Union{PermutedDimsArray,Transpose,Adjoint}) = bindable(parent(a))
 function (c::Compiled)(args...)
     length(args) == c.nargs ||
         throw(ArgumentError("compiled graph takes $(c.nargs) arrays, got $(length(args))"))
-    bindings = IdDict{Tensor,Any}()
+    bindings = copy(c.extra)
     for (i, node) in enumerate(c.trace.nodes)
         t = c.tensors[i]
         t === nothing && continue

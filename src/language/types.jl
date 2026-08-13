@@ -48,6 +48,13 @@ struct Cast                 # dtype conversion: IDENTITY with a typed output
     x::Int
     T::DataType
 end
+struct Sdpa                 # scaled dot-product attention (unified SDPA op)
+    q::Int
+    k::Int
+    v::Int
+    scale::Int              # Constant node, bound by value at execution
+    causal::Bool            # trace-time: bakes a mask subgraph into the graph
+end
 
 mutable struct Trace
     nodes::Vector{Any}
@@ -66,6 +73,7 @@ noderefs(n::Norm) =
     Tuple(id for id in (n.x, n.scale, n.bias, n.mean, n.inv_variance, n.epsilon)
           if id !== nothing)
 noderefs(n::Cast) = (n.x,)
+noderefs(n::Sdpa) = (n.q, n.k, n.v, n.scale)
 noderefs(n::Presented) = (n.src,)
 noderefs(n::Reshaped) = (n.src,)
 noderefs(n) = ()

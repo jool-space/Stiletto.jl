@@ -8,6 +8,7 @@ struct Compiled
     outputs::Vector{Int}
     output_dims::Vector{Vector{Int}}
     output_eltypes::Vector{DataType}
+    extra::IdDict{Tensor,Any}   # bindings decided at emission (mega-op auxiliaries)
     allocator::Any
 end
 
@@ -81,7 +82,8 @@ function compile(f, args...; io_dtype=Float32, intermediate_dtype=Float32,
         node isa Leaf && (tr.nodes[i] = Leaf(node.argindex, nothing))
     end
     return Compiled(g, tr, tensors, length(args), [o.id for o in outputs],
-                    [collect(Int, o.dims) for o in outputs], eltypes, allocator)
+                    [collect(Int, o.dims) for o in outputs], eltypes, tf.extra,
+                    allocator)
 end
 
 # memoized lazy declaration; recursion follows data dependencies, so ops are
@@ -91,7 +93,9 @@ struct TensorFor
     trace::Trace
     tensors::Vector{Union{Nothing,Tensor}}
     rank::Int
+    extra::IdDict{Tensor,Any}   # emit! may record bindings for op-internal inputs
 end
+TensorFor(g, trace, tensors, rank) = TensorFor(g, trace, tensors, rank, IdDict{Tensor,Any}())
 function (tf::TensorFor)(i::Int)
     t = tf.tensors[i]
     t === nothing || return t

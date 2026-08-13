@@ -58,6 +58,15 @@ emit!(g::Graph, tf, i, node::Norm, R) =
               mean=maybe(tf, node.mean), inv_variance=maybe(tf, node.inv_variance),
               epsilon=maybe(tf, node.epsilon), name=nodename(i, node))
 
+function emit!(g::Graph, tf, i, node::Sdpa, R)
+    o = sdpa_fwd!(g, tf(node.q), tf(node.k), tf(node.v); o=dest_tensor(tf, i),
+                  scale=tf(node.scale), causal=node.causal)
+    # the causal mask's fill value is a runtime input of the mega-op, not a
+    # node of the trace; bind it here
+    node.causal && (tf.extra[g.ops[end].mask_subgraph.fill] = -Inf32)
+    return o
+end
+
 function emit!(g::Graph, tf, i, node::Cast, R)
     x = tf(node.x)
     y = dest_tensor(tf, i)

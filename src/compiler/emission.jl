@@ -72,6 +72,12 @@ emit!(g::Graph, tf, i, node::Conv, R) =
                 pre_padding=node.pre_padding, post_padding=node.post_padding,
                 stride=node.stride, dilation=node.dilation, name=nodename(i, node))
 
+emit!(g::Graph, tf, i, node::Resample, R) =
+    resample_fwd!(g, tf(node.x); y=dest_tensor(tf, i), mode=node.mode,
+                  window=node.window, pre_padding=node.pre_padding,
+                  post_padding=node.post_padding, stride=node.stride,
+                  name=nodename(i, node))
+
 function emit!(g::Graph, tf, i, node::Cast, R)
     x = tf(node.x)
     y = dest_tensor(tf, i)

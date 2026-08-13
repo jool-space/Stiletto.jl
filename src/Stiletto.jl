@@ -12,7 +12,7 @@ using CUDACore: CuArray
 using LinearAlgebra: LinearAlgebra, Transpose, Adjoint
 using Statistics: Statistics
 using cuDNN: cuDNN, Graph, Tensor, tensor!, scalar!, output!, matmul!, pointwise!,
-    reduction!, norm_fwd!, sdpa_fwd!, conv_fprop!, execute!, build!, UnsupportedGraphError,
+    reduction!, norm_fwd!, sdpa_fwd!, conv_fprop!, resample_fwd!, execute!, build!, UnsupportedGraphError,
     cudnnPointwiseMode_t,
     CUDNN_POINTWISE_ADD, CUDNN_POINTWISE_MUL, CUDNN_POINTWISE_SUB, CUDNN_POINTWISE_DIV,
     CUDNN_POINTWISE_MAX, CUDNN_POINTWISE_MIN, CUDNN_POINTWISE_POW, CUDNN_POINTWISE_ATAN2,
@@ -28,7 +28,7 @@ using cuDNN: cuDNN, Graph, Tensor, tensor!, scalar!, output!, matmul!, pointwise
     CUDNN_DATA_BOOLEAN
 
 export compile, jit, @compile, @jit, TracedArray
-public rmsnorm, rmsnorm!, layernorm, layernorm!, batchnorm, batchnorm!, attention, attention!, conv, conv!
+public rmsnorm, rmsnorm!, layernorm, layernorm!, batchnorm, batchnorm!, attention, attention!, conv, conv!, maxpool, maxpool!, meanpool, meanpool!
 
 # Language surface: what traced programs are written in
 include("language/types.jl")
@@ -45,5 +45,6 @@ include("compiler/cache.jl")
 include("library/norms.jl")
 include("library/attention.jl")
 include("library/conv.jl")
+include("library/pool.jl")
 
 end

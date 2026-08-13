@@ -76,6 +76,24 @@ function ref_conv(x, w; stride=1, dilation=1, pre_padding=0, post_padding=pre_pa
     return y
 end
 
+function ref_pool(mode, x, window; stride=window, pre_padding=0, post_padding=pre_padding)
+    rank = ndims(x) - 2
+    tup(v) = v isa Integer ? ntuple(_ -> Int(v), rank) : Tuple(Int.(v))
+    win, str, pre, post = tup(window), tup(stride), tup(pre_padding), tup(post_padding)
+    outsp = ntuple(i -> fld(size(x, i) + pre[i] + post[i] - win[i], str[i]) + 1, rank)
+    y = zeros(Float32, outsp..., size(x, rank + 1), size(x, rank + 2))
+    for n in axes(y, rank + 2), c in axes(y, rank + 1), oi in CartesianIndices(outsp)
+        vals = Float32[]
+        for ki in CartesianIndices(win)
+            xi = ntuple(i -> (oi[i] - 1) * str[i] + ki[i] - pre[i], rank)
+            all(1 .<= xi .<= size(x)[1:rank]) && push!(vals, Float32(x[xi..., c, n]))
+        end
+        y[oi, c, n] = mode === :maxpool ? maximum(vals) :
+                      mode === :include ? sum(vals) / prod(win) : sum(vals) / length(vals)
+    end
+    return y
+end
+
 @testset "Stiletto" begin
 
 @testset "matmul" begin
@@ -378,6 +396,36 @@ end
                                            CuArray(randn(Float32, K, 3, D)))
     @test_throws DimensionMismatch compile((x, w) -> Stiletto.conv(x, w; stride=(1, 2)),
                                            xs, wd)
+end
+
+@testset "pooling" begin
+    xh = rand(Float32, 8, 9, 3, 2)
+    x = CuArray(xh)
+    # shape contracts surface at trace time, engine-independent
+    @test_throws DimensionMismatch compile(x -> Stiletto.maxpool(x, (2, 3, 2)), x)
+
+    # resample engines are absent on sm_121/cuDNN 9.24 (probed across dtypes
+    # and layouts); numerics activate where cuDNN provides them
+    cp = try
+        compile(x -> Stiletto.maxpool(x, (2, 3)), x)
+    catch e
+        e isa cuDNN.UnsupportedGraphError || rethrow()
+        nothing
+    end
+    if cp === nothing
+        @test_skip false
+    else
+        @test Array(cp(x)) ≈ ref_pool(:maxpool, xh, (2, 3)) rtol=1e-6
+        # overlapping windows and padding; mean over contributors vs full window
+        @test Array(Stiletto.meanpool(x, 3; stride=2, pre_padding=1)) ≈
+              ref_pool(:exclude, xh, 3; stride=2, pre_padding=1) rtol=1e-5
+        @test Array(Stiletto.meanpool(x, 3; stride=2, pre_padding=1,
+                                      include_padding=true)) ≈
+              ref_pool(:include, xh, 3; stride=2, pre_padding=1) rtol=1e-5
+        y = CuArray(zeros(Float32, 4, 3, 3, 2))
+        @test Stiletto.maxpool!(y, x, (2, 3)) === y
+        @test Array(y) ≈ ref_pool(:maxpool, xh, (2, 3)) rtol=1e-6
+    end
 end
 
 @testset "reshape" begin

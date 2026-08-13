@@ -55,6 +55,14 @@ struct Sdpa                 # scaled dot-product attention (unified SDPA op)
     scale::Int              # Constant node, bound by value at execution
     causal::Bool            # trace-time: bakes a mask subgraph into the graph
 end
+struct Conv                 # cross-correlation; groups inferred from channels
+    x::Int
+    w::Int
+    pre_padding::Vector{Int}
+    post_padding::Vector{Int}
+    stride::Vector{Int}
+    dilation::Vector{Int}
+end
 
 mutable struct Trace
     nodes::Vector{Any}
@@ -74,6 +82,7 @@ noderefs(n::Norm) =
           if id !== nothing)
 noderefs(n::Cast) = (n.x,)
 noderefs(n::Sdpa) = (n.q, n.k, n.v, n.scale)
+noderefs(n::Conv) = (n.x, n.w)
 noderefs(n::Presented) = (n.src,)
 noderefs(n::Reshaped) = (n.src,)
 noderefs(n) = ()

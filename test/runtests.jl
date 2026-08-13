@@ -55,6 +55,27 @@ function ref_attention(q, k, v; scale, causal=false)  # (d, h, s, b); causal ass
     return o
 end
 
+function ref_conv(x, w; stride=1, dilation=1, pre_padding=0, post_padding=pre_padding)
+    rank = ndims(x) - 2
+    tup(v) = v isa Integer ? ntuple(_ -> Int(v), rank) : Tuple(Int.(v))
+    pre, post, str, dil = tup(pre_padding), tup(post_padding), tup(stride), tup(dilation)
+    cw, cout, N = size(w, rank + 1), size(w, rank + 2), size(x, rank + 2)
+    groups = size(x, rank + 1) ÷ cw
+    outsp = ntuple(i -> 1 + (size(x, i) + pre[i] + post[i] - dil[i] * (size(w, i) - 1) - 1) ÷ str[i],
+                   rank)
+    y = zeros(Float32, outsp..., cout, N)
+    for n in 1:N, o in 1:cout, oi in CartesianIndices(outsp),
+        ki in CartesianIndices(size(w)[1:rank])
+        xi = ntuple(i -> (oi[i] - 1) * str[i] + (ki[i] - 1) * dil[i] + 1 - pre[i], rank)
+        all(1 .<= xi .<= size(x)[1:rank]) || continue
+        gr = fld1(o, cout ÷ groups)
+        for ci in 1:cw
+            y[oi, o, n] += Float32(x[xi..., (gr - 1) * cw + ci, n]) * Float32(w[ki, ci, o])
+        end
+    end
+    return y
+end
+
 @testset "Stiletto" begin
 
 @testset "matmul" begin
@@ -288,6 +309,75 @@ end
                                            CuArray(randn(Float16, d, 3, s, b)))
     @test_throws DimensionMismatch compile((q, k, v) -> Stiletto.attention(q, k, v),
                                            Q, CuArray(randn(Float16, d, h, 16, b)), V)
+end
+
+@testset "convolution" begin
+    xh, wh = randn(Float32, 16, 14, 3, 2), randn(Float32, 3, 3, 3, 8)
+    x, w = CuArray(xh), CuArray(wh)
+    c = compile((x, w) -> Stiletto.conv(x, w), x, w)
+    @test Array(c(x, w)) ≈ ref_conv(xh, wh) rtol=1e-2 atol=1e-2
+
+    # stride, dilation, and asymmetric padding
+    kw = (; stride=(2, 1), dilation=(1, 2), pre_padding=(1, 0), post_padding=(2, 1))
+    c = compile((x, w) -> Stiletto.conv(x, w; kw...), x, w)
+    @test Array(c(x, w)) ≈ ref_conv(xh, wh; kw...) rtol=1e-2 atol=1e-2
+
+    # grouped: 4 input channels through 2 groups onto 6 outputs
+    xgh, wgh = randn(Float32, 10, 9, 4, 2), randn(Float32, 3, 3, 2, 6)
+    xg, wg = CuArray(xgh), CuArray(wgh)
+    c = compile((x, w) -> Stiletto.conv(x, w), xg, wg)
+    @test Array(c(xg, wg)) ≈ ref_conv(xgh, wgh) rtol=1e-2 atol=1e-2
+
+    # depthwise causal conv1d: one spatial dim, (time, channels, batch)
+    T, D, B, K = 32, 8, 2, 4
+    xsh, wdh = randn(Float32, T, D, B), randn(Float32, K, 1, D)
+    xs, wd = CuArray(xsh), CuArray(wdh)
+    causal = (; pre_padding=K - 1, post_padding=0)
+    refc = ref_conv(xsh, wdh; causal...)
+    c = compile((x, w) -> Stiletto.conv(x, w; causal...), xs, wd)
+    @test size(c(xs, wd)) == (T, D, B)
+    @test Array(c(xs, wd)) ≈ refc rtol=1e-2 atol=1e-2
+
+    # channels-first storage presented channel-innermost in-trace: the
+    # sequence layout of Vallmo's causal_conv1d, permutation free on inputs
+    xcf = CuArray(permutedims(xsh, (2, 1, 3)))
+    ccf = compile((x, w) -> Stiletto.conv(permutedims(x, (2, 1, 3)), w; causal...),
+                  xcf, wd)
+    @test Array(ccf(xcf, wd)) ≈ refc rtol=1e-2 atol=1e-2
+
+    # conv+pointwise fusion is engine inventory (absent on sm_121/9.24):
+    # skip rather than claim
+    bh = randn(Float32, 1, D, 1)
+    ep = try
+        compile((x, w, b) -> swish.(Stiletto.conv(x, w; causal...) .+ b),
+                xs, wd, CuArray(bh))
+    catch e
+        e isa cuDNN.UnsupportedGraphError || rethrow()
+        nothing
+    end
+    if ep === nothing
+        @test_skip false
+    else
+        @test Array(ep(xs, wd, CuArray(bh))) ≈
+              Float32.(swish.(refc .+ bh)) rtol=1e-2 atol=1e-2
+    end
+
+    # eager tiers, cached per signature
+    @test Array(Stiletto.conv(xs, wd; causal...)) ≈ refc rtol=1e-2 atol=1e-2
+    y = CuArray(zeros(Float32, T, D, B))
+    @test Stiletto.conv!(y, xs, wd; causal...) === y
+    @test Array(y) ≈ refc rtol=1e-2 atol=1e-2
+    nplans = length(cuDNN.handle().plans)
+    Stiletto.conv!(y, xs, wd; causal...)
+    @test length(cuDNN.handle().plans) == nplans
+
+    # shape contracts surface at trace time
+    @test_throws DimensionMismatch compile((x, w) -> Stiletto.conv(x, w), xs,
+                                           CuArray(randn(Float32, K, 1, 1, D)))
+    @test_throws DimensionMismatch compile((x, w) -> Stiletto.conv(x, w), xs,
+                                           CuArray(randn(Float32, K, 3, D)))
+    @test_throws DimensionMismatch compile((x, w) -> Stiletto.conv(x, w; stride=(1, 2)),
+                                           xs, wd)
 end
 
 @testset "reshape" begin

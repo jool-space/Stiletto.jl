@@ -67,6 +67,11 @@ function emit!(g::Graph, tf, i, node::Sdpa, R)
     return o
 end
 
+emit!(g::Graph, tf, i, node::Conv, R) =
+    conv_fprop!(g, tf(node.x), tf(node.w); y=dest_tensor(tf, i),
+                pre_padding=node.pre_padding, post_padding=node.post_padding,
+                stride=node.stride, dilation=node.dilation, name=nodename(i, node))
+
 function emit!(g::Graph, tf, i, node::Cast, R)
     x = tf(node.x)
     y = dest_tensor(tf, i)

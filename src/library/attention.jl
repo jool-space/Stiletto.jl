@@ -18,23 +18,23 @@ execution; `causal` bakes a causal mask into the graph.
 function attention(q::TracedArray, k, v;
                    scale::Real=inv(sqrt(size(q, 1))), causal::Bool=false)
     tr = q.trace
-    kt = k isa TracedArray ? k : capture(tr, k)
-    vt = v isa TracedArray ? v : capture(tr, v)
-    sametrace(q, kt, vt)
-    ndims(q) == ndims(kt) == ndims(vt) == 4 || throw(ArgumentError(
+    k = k isa TracedArray ? k : capture(tr, k)
+    v = v isa TracedArray ? v : capture(tr, v)
+    sametrace(q, k, v)
+    ndims(q) == ndims(k) == ndims(v) == 4 || throw(ArgumentError(
         "attention operands are rank-4 (head_dim, heads, seq_len, batch)"))
     d, hq, sq, b = size(q)
-    size(kt, 1) == size(vt, 1) == d || throw(DimensionMismatch(
-        "attention head dimensions do not match: q $(size(q)), k $(size(kt)), v $(size(vt))"))
-    size(kt, 2) == size(vt, 2) && hq % size(kt, 2) == 0 || throw(DimensionMismatch(
+    size(k, 1) == size(v, 1) == d || throw(DimensionMismatch(
+        "attention head dimensions do not match: q $(size(q)), k $(size(k)), v $(size(v))"))
+    size(k, 2) == size(v, 2) && hq % size(k, 2) == 0 || throw(DimensionMismatch(
         "attention q heads ($hq) must be a multiple of matching k/v heads " *
-        "($(size(kt, 2)), $(size(vt, 2)))"))
-    size(kt, 3) == size(vt, 3) || throw(DimensionMismatch(
-        "attention k/v sequence lengths do not match: k $(size(kt)), v $(size(vt))"))
-    size(kt, 4) == size(vt, 4) == b || throw(DimensionMismatch(
-        "attention batch sizes do not match: q $(size(q)), k $(size(kt)), v $(size(vt))"))
+        "($(size(k, 2)), $(size(v, 2)))"))
+    size(k, 3) == size(v, 3) || throw(DimensionMismatch(
+        "attention k/v sequence lengths do not match: k $(size(k)), v $(size(v))"))
+    size(k, 4) == size(v, 4) == b || throw(DimensionMismatch(
+        "attention batch sizes do not match: q $(size(q)), k $(size(k)), v $(size(v))"))
     s = traced(tr, Float32, (), Constant(Float32(scale)))
-    return traced(tr, eltype(q), q.dims, Sdpa(q.id, kt.id, vt.id, s.id, causal))
+    return traced(tr, eltype(q), q.dims, Sdpa(q.id, k.id, v.id, s.id, causal))
 end
 
 attention!(o::TracedArray, q::TracedArray, k, v; kwargs...) =

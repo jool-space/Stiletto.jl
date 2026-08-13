@@ -43,14 +43,16 @@ function (c::Compiled)(args...)
         t = c.tensors[i]
         t === nothing && continue
         if node isa Leaf
-            bindings[t] = t.by_value ? args[node.argindex] : bindable(args[node.argindex])
+            t.by_value ? (bindings[t] = args[node.argindex]) :
+                         bind!(c.graph, bindings, t, bindable(args[node.argindex]))
         elseif node isa Captured
-            bindings[t] = bindable(node.array)
+            bind!(c.graph, bindings, t, bindable(node.array))
         elseif node isa Constant
             bindings[t] = node.value
         elseif node isa Presented
             src = c.trace.nodes[node.src]
-            bindings[t] = bindable(src isa Leaf ? args[src.argindex] : src.array)
+            bind!(c.graph, bindings, t,
+                  bindable(src isa Leaf ? args[src.argindex] : src.array))
         elseif node isa Reshaped
             src = c.trace.nodes[node.src]
             arr = bindable(src isa Leaf ? args[src.argindex] : src.array)
@@ -83,4 +85,3 @@ end
 Base.show(io::IO, c::Compiled) =
     print(io, "$Compiled($(c.nargs) arguments, \
                $(count(!isnothing, c.tensors)) tensors)")
-

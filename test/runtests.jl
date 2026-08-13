@@ -928,6 +928,7 @@ end
                                            CuArray(rand(Float32, 8, 4)), CuArray(rand(Float32, 8, 1)))
 end
 include("corpus.jl")
+include("microscaling.jl")
 
 
 end

@@ -30,7 +30,7 @@ using cuDNN: cuDNN, Graph, Tensor, tensor!, scalar!, output!, matmul!, pointwise
 export compile, jit, @compile, @jit, TracedArray
 public rmsnorm, rmsnorm!, layernorm, layernorm!, batchnorm, batchnorm!
 public attention, attention!, conv, conv!, maxpool, maxpool!, meanpool, meanpool!
-public mul!, batched_mul, batched_mul!, ⊠
+public mul!, batched_mul, batched_mul!, ⊠, quantize!
 
 # Language surface: what traced programs are written in
 include("language/types.jl")
@@ -50,5 +50,6 @@ include("library/norms.jl")
 include("library/attention.jl")
 include("library/conv.jl")
 include("library/pool.jl")
+include("library/quantize.jl")
 
 end

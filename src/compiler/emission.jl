@@ -83,6 +83,16 @@ emit!(g::Graph, tf, i, node::Resample, R) =
                   post_padding=node.post_padding, stride=node.stride,
                   name=nodename(i, node))
 
+# projections force their op (memoized) and fetch the auxiliary tensor the
+# op's emission recorded
+function emit!(g::Graph, tf, i, node::Aux, R)
+    tf(node.src)
+    t = get(tf.aux, (node.src, node.which), nothing)
+    t === nothing && throw(ArgumentError(
+        "node $(node.src) provides no auxiliary result $(node.which)"))
+    return t
+end
+
 function emit!(g::Graph, tf, i, node::Cast, R)
     x = tf(node.x)
     y = dest_tensor(tf, i)

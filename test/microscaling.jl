@@ -5,7 +5,7 @@
 # gemm operands are stored (K, ·) and the left operand is transposed in the
 # traced code.
 
-using Microscaling: BlockscaledArray, sm1xx, elements, scales,
+using Microscaling: BlockscaledArray, Sm1xxArray, sm1xx, elements, scales,
     Float8_E4M3FN, Float8_E5M2, Float8_E8M0FNU, Float4_E2M1FN
 using BitPacking: NarrowArray
 
@@ -122,6 +122,75 @@ end
         ci(C, W, X)
         @test Array(C) ≈ C_ref rtol=1e-4 atol=1e-4
     end
+
+    # materializing a dequantize through pointwise alone (`d .= a`) is the
+    # mirror of standalone quantize: the graph is valid, but engines only
+    # take dequantize on the matmul path; skip rather than claim
+    dm = CuArray(zeros(Float32, K, M))
+    cm = compile_blockscale((d, a) -> (d .= a; nothing), dm, W)
+    if cm === nothing
+        @test_skip blockscale_claimed
+    else
+        cm(dm, W)
+        @test Array(dm) ≈ dequant_ref(w_element, w_scale, block) rtol=1e-5
+    end
+end
+
+@testset "fused matmul→quantize" begin
+    # the full narrow-precision pipeline in one graph: dequantize both
+    # operands, matmul, quantize back into a BlockscaledArray destination —
+    # elements and swizzled scales written into the composite's storage
+    Scale, Element, block = Float8_E8M0FNU, Float8_E4M3FN, 32
+    M, N, K = 256, 128, 256
+    w_element = Element.(randn(Float32, K, M))
+    x_element = Element.(randn(Float32, K, N))
+    w_scale = Scale.(rand(Float32, K ÷ block, M) / √K)
+    x_scale = Scale.(rand(Float32, K ÷ block, N) / √K)
+    C_ref = dequant_ref(w_element, w_scale, block)' *
+            dequant_ref(x_element, x_scale, block)
+
+    W = BlockscaledArray(sm1xx(CuArray(w_scale)), CuArray(w_element))
+    X = BlockscaledArray(sm1xx(CuArray(x_scale)), CuArray(x_element))
+    D = BlockscaledArray(
+        Sm1xxArray(CuArray{Scale}(undef, 4, 4, 32, (M ÷ block) ÷ 4, N ÷ 128)),
+        CuArray{Element}(undef, M, N))
+
+    # measured supported on sm_121 / cuDNN 9.24
+    c = compile((d, w, x) -> Stiletto.quantize!(d, w' * x), D, W, X)
+    c(D, W, X)
+    # block-quantization error dominates the loose tolerance; a mislaid
+    # swizzle misses by powers of two, so this still catches layout errors
+    @test Float32.(Array(copy(D))) ≈ C_ref rtol=0.15 atol=0.15
+
+    # chained layers: the quantized activation feeds the next quantized
+    # matmul as an ordinary argument — per-layer narrow-precision end to end
+    P = 128
+    w2_element = Element.(randn(Float32, M, P))
+    w2_scale = Scale.(rand(Float32, M ÷ block, P) / √M)
+    W2 = BlockscaledArray(sm1xx(CuArray(w2_scale)), CuArray(w2_element))
+    Y = jit((d, w) -> d' * w, D, W2)
+    hq = Float32.(Array(copy(D)))   # layer 2 consumes the quantized activation
+    @test Array(Y) ≈ hq' * dequant_ref(w2_element, w2_scale, block) rtol=1e-2 atol=1e-2
+
+    # standalone quantize (input, nothing to fuse with) is engine inventory;
+    # skip rather than claim
+    xd = CuArray(randn(Float32, M, N))
+    cs = compile_blockscale((d, x) -> Stiletto.quantize!(d, x), D, xd)
+    if cs === nothing
+        @test_skip blockscale_claimed
+    else
+        cs(D, xd)
+        @test Float32.(Array(copy(D))) ≈ Array(xd) rtol=0.15 atol=0.15
+    end
+
+    # contracts surface at trace time
+    @test_throws ArgumentError compile((d, w, x) -> Stiletto.quantize!(d, w' * x),
+                                       CuArray(zeros(Float32, M, N)), W, X)
+    @test_throws ArgumentError compile(
+        (d, w, x) -> (q = w' * x; Stiletto.quantize!(d, q); Stiletto.quantize!(d, q)),
+        D, W, X)
+    @test_throws DimensionMismatch compile((d, w, x) -> Stiletto.quantize!(d, x' * w),
+                                           D, W, X)
 end
 
 end

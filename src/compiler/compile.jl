@@ -120,9 +120,11 @@ struct TensorFor
     rank::Int
     extra::IdDict{Tensor,Any}   # emit! may record bindings for op-internal inputs
     dests::Dict{Int,Tensor}     # pre-built destination tensors (permuted outputs)
+    aux::Dict{Tuple{Int,Symbol},Tensor}   # auxiliary results of multi-result ops
 end
 TensorFor(g, trace, tensors, rank) =
-    TensorFor(g, trace, tensors, rank, IdDict{Tensor,Any}(), Dict{Int,Tensor}())
+    TensorFor(g, trace, tensors, rank, IdDict{Tensor,Any}(), Dict{Int,Tensor}(),
+              Dict{Tuple{Int,Symbol},Tensor}())
 function (tf::TensorFor)(i::Int)
     t = tf.tensors[i]
     t === nothing || return t

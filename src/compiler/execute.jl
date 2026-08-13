@@ -66,7 +66,7 @@ function (c::Compiled)(args...)
     destarray(leafid) = (leaf = c.trace.nodes[leafid];
                          leaf isa Leaf ? args[leaf.argindex] : leaf.array)
     for (vid, leafid) in c.trace.destinations
-        bindings[c.tensors[vid]] = bindable(destarray(leafid))
+        bind!(c.graph, bindings, c.tensors[vid], bindable(destarray(leafid)))
     end
     # outputs allocate their logical shape; the layout check accepts the dense
     # buffer, and a permuted output's declared strides make the engine write it

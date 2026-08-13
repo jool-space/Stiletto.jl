@@ -57,6 +57,10 @@ struct Cast                 # dtype conversion: IDENTITY with a typed output
     x::Int
     T::DataType
 end
+struct Aux                  # auxiliary result of a multi-result op node
+    src::Int
+    which::Symbol
+end
 struct Sdpa                 # scaled dot-product attention (unified SDPA op)
     q::Int
     k::Int
@@ -100,6 +104,7 @@ noderefs(n::Norm) =
     Tuple(id for id in (n.x, n.scale, n.bias, n.mean, n.inv_variance, n.epsilon)
           if id !== nothing)
 noderefs(n::Cast) = (n.x,)
+noderefs(n::Aux) = (n.src,)
 noderefs(n::Sdpa) =
     Tuple(id for id in (n.q, n.k, n.v, n.scale, n.seq_len_q, n.seq_len_kv)
           if id !== nothing)

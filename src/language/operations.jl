@@ -1,35 +1,37 @@
 # ## Matmul
 #
 # Julia dimension order with the batch trailing, matching cuDNN.matmul!:
-# (M, K[, B]) × (K, N[, B]) → (M, N[, B]), batch extents broadcastable.
+# (M, K, batch...) × (K, N, batch...) → (M, N, batch...), with batch extents
+# broadcasting pairwise — matching or 1, missing dimensions counting as 1.
+# `*` and `mul!` keep Base's 2-D semantics; batching is spelled
+# `batched_mul`/`⊠`, which exposes the general rank-N form.
 
 function matmul(a::TracedArray, b::TracedArray)
     tr = sametrace(a, b)
-    2 <= ndims(a) <= 3 && 2 <= ndims(b) <= 3 ||
-        throw(ArgumentError("traced matmul takes 2- or 3-dimensional operands"))
+    ndims(a) >= 2 && ndims(b) >= 2 ||
+        throw(ArgumentError("matmul operands need at least 2 dimensions"))
     size(a, 2) == size(b, 1) || throw(DimensionMismatch(
         "matmul inner dimensions do not match: $(size(a)) × $(size(b))"))
-    batch = max(size(a, 3), size(b, 3))
-    size(a, 3) in (1, batch) && size(b, 3) in (1, batch) || throw(DimensionMismatch(
-        "matmul batch dimensions are not broadcastable: $(size(a)) × $(size(b))"))
+    batch = ntuple(max(ndims(a), ndims(b)) - 2) do i
+        da, db = size(a, i + 2), size(b, i + 2)
+        da == db || da == 1 || db == 1 || throw(DimensionMismatch(
+            "matmul batch dimensions are not broadcastable: $(size(a)) × $(size(b))"))
+        max(da, db)
+    end
     T = promote_type(eltype(a), eltype(b))
-    dims = max(ndims(a), ndims(b)) == 2 ? (size(a, 1), size(b, 2)) :
-                                          (size(a, 1), size(b, 2), batch)
-    return traced(tr, T, dims, Matmul(a.id, b.id))
+    return traced(tr, T, (size(a, 1), size(b, 2), batch...), Matmul(a.id, b.id))
 end
 
-const TracedMatOrBatch = Union{TracedArray{<:Any,2},TracedArray{<:Any,3}}
-Base.:*(a::TracedMatOrBatch, b::TracedMatOrBatch) = matmul(a, b)
-Base.:*(a::TracedMatOrBatch, b::AbstractMatrix) = matmul(a, capture(a.trace, b))
-Base.:*(a::AbstractMatrix, b::TracedMatOrBatch) = matmul(capture(b.trace, a), b)
-Base.:*(a::TracedMatOrBatch, b::AbstractArray{<:Any,3}) = matmul(a, capture(a.trace, b))
-Base.:*(a::AbstractArray{<:Any,3}, b::TracedMatOrBatch) = matmul(capture(b.trace, a), b)
+const TracedMatrix = TracedArray{<:Any,2}
+Base.:*(a::TracedMatrix, b::TracedMatrix) = matmul(a, b)
+Base.:*(a::TracedMatrix, b::AbstractMatrix) = matmul(a, capture(a.trace, b))
+Base.:*(a::AbstractMatrix, b::TracedMatrix) = matmul(capture(b.trace, a), b)
 # disambiguators against LinearAlgebra's wrapper-specialized *
 const LazyWrapped = Union{Adjoint{<:Any,<:AbstractMatrix},Transpose{<:Any,<:AbstractMatrix}}
-Base.:*(a::LazyWrapped, b::TracedMatOrBatch) = matmul(capture(b.trace, a), b)
-Base.:*(a::TracedMatOrBatch, b::LazyWrapped) = matmul(a, capture(a.trace, b))
-Base.:*(a::Adjoint{<:Any,<:AbstractVector}, b::TracedMatOrBatch) = matmul(capture(b.trace, a), b)
-Base.:*(a::Transpose{<:Any,<:AbstractVector}, b::TracedMatOrBatch) = matmul(capture(b.trace, a), b)
+Base.:*(a::LazyWrapped, b::TracedMatrix) = matmul(capture(b.trace, a), b)
+Base.:*(a::TracedMatrix, b::LazyWrapped) = matmul(a, capture(a.trace, b))
+Base.:*(a::Adjoint{<:Any,<:AbstractVector}, b::TracedMatrix) = matmul(capture(b.trace, a), b)
+Base.:*(a::Transpose{<:Any,<:AbstractVector}, b::TracedMatrix) = matmul(capture(b.trace, a), b)
 
 # ## Presentation
 #
@@ -116,10 +118,10 @@ function assign!(dest::TracedArray, v::TracedArray)
     return v
 end
 
-LinearAlgebra.mul!(c::TracedArray, a::TracedArray, b::TracedArray) = assign!(c, matmul(a, b))
-LinearAlgebra.mul!(c::TracedArray, a::AbstractArray, b::TracedArray) =
+LinearAlgebra.mul!(c::TracedMatrix, a::TracedMatrix, b::TracedMatrix) = assign!(c, matmul(a, b))
+LinearAlgebra.mul!(c::TracedMatrix, a::AbstractMatrix, b::TracedMatrix) =
     assign!(c, matmul(capture(c.trace, a), b))
-LinearAlgebra.mul!(c::TracedArray, a::TracedArray, b::AbstractArray) =
+LinearAlgebra.mul!(c::TracedMatrix, a::TracedMatrix, b::AbstractMatrix) =
     assign!(c, matmul(a, capture(c.trace, b)))
 
 Base.Broadcast.materialize!(dest::TracedArray, bc::Broadcast.Broadcasted) =

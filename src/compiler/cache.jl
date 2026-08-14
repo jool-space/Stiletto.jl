@@ -40,6 +40,11 @@ by-value tensors rebound per call. Captured values are trace-time constants
 — what the tracer sees: isbits captures (flags, dims) specialize the graph
 per value and may be branched on; captured arrays are baked by identity.
 Pass data as arguments; capture configuration.
+
+Keyword arguments forward to [`compile`](@ref) — including the
+engine-selection knobs (`max_workspace`, `deterministic`, `heuristics`) —
+and participate in the plan key: the same call with a different knob is a
+different cached plan.
 """
 function jit(f::F, args...; kwargs...) where {F}
     fkey = ntuple(i -> capture_key(getfield(f, i)), fieldcount(F))

@@ -4,7 +4,8 @@ using CUDACore: CUDACore, CuArray, allowscalar
 import cuDNN
 using BFloat16s: BFloat16
 using LinearAlgebra: mul!
-using NNlib: relu, sigmoid, gelu, swish, softplus, elu
+using NNlib: NNlib, relu, sigmoid, gelu, swish, softplus, elu
+using Stiletto: ⊠
 using SpecialFunctions: erf
 using Statistics: mean
 
@@ -112,6 +113,35 @@ end
     @test allocations == 1
 end
 
+@testset "engine-selection knobs" begin
+    A, B = CuArray(rand(Float32, 64, 48)), CuArray(rand(Float32, 48, 32))
+    ref = Array(A) * Array(B)
+
+    # all measured supported on sm_121 / cuDNN 9.24: deterministic engines
+    # exist for matmul, and capping the workspace steers selection to a
+    # workspace-free plan (the unconstrained pick demands ~32 MB)
+    cd = compile((a, b) -> a * b, A, B; deterministic=true)
+    @test Array(cd(A, B)) ≈ ref rtol=1e-2 atol=1e-2
+
+    cw = compile((a, b) -> a * b, A, B; max_workspace=0)
+    @test cw.graph.workspace_size == 0
+    @test Array(cw(A, B)) ≈ ref rtol=1e-2 atol=1e-2
+
+    ch = compile((a, b) -> a * b, A, B;
+                 heuristics=(cuDNN.CUDNN_HEUR_MODE_FALLBACK,))
+    @test Array(ch(A, B)) ≈ ref rtol=1e-2 atol=1e-2
+
+    # knobs participate in jit's plan key: same signature, different knobs,
+    # distinct cached plans
+    f = (a, b) -> a * b
+    n0 = length(cuDNN.handle().plans)
+    jit(f, A, B)
+    jit(f, A, B; max_workspace=0)
+    @test length(cuDNN.handle().plans) == n0 + 2
+    jit(f, A, B; max_workspace=0)   # cached, no new plan
+    @test length(cuDNN.handle().plans) == n0 + 2
+end
+
 @testset "matmul epilogue" begin
     A, B = CuArray(rand(Float32, 64, 64)), CuArray(rand(Float32, 64, 64))
     c = compile((a, b) -> max.(a * b .- 1f0, 0f0), A, B)
@@ -134,22 +164,78 @@ end
     @test Array(c(A, B)) ≈ Array(A)' * Array(B) rtol=1e-2 atol=1e-2
 end
 
-@testset "batched matmul" begin
-    A, B = CuArray(rand(Float32, 32, 16, 4)), CuArray(rand(Float32, 16, 24, 4))
-    c = compile((a, b) -> a * b, A, B)
-    got = Array(c(A, B))
-    for k in 1:4
-        @test got[:, :, k] ≈ Array(A)[:, :, k] * Array(B)[:, :, k] rtol=1e-2 atol=1e-2
+@testset "batched matmul (⊠)" begin
+    # torch-style batched matmul: any number of trailing batch dims,
+    # broadcasting pairwise, missing dims counting as 1. The trace accepts
+    # the general form; engine inventory decides what executes — sm_121 /
+    # cuDNN 9.24 has matmul engines only at rank 3 (one batch dim).
+    function ref_bmm(a, b)
+        N = max(ndims(a), ndims(b))
+        batch = ntuple(i -> max(size(a, i + 2), size(b, i + 2)), N - 2)
+        c = zeros(Float32, size(a, 1), size(b, 2), batch...)
+        for I in CartesianIndices(batch)
+            ia = CartesianIndex(ntuple(i -> min(I[i], size(a, i + 2)), N - 2))
+            ib = CartesianIndex(ntuple(i -> min(I[i], size(b, i + 2)), N - 2))
+            c[:, :, I] = Float32.(a[:, :, ia]) * Float32.(b[:, :, ib])
+        end
+        return c
     end
-end
 
-@testset "broadcast batch: shared weights" begin
+    # `*` and `mul!` keep Base's 2-D semantics; batching is spelled ⊠
+    @test_throws MethodError compile((a, b) -> a * b,
+        CuArray(rand(Float32, 8, 16, 3)), CuArray(rand(Float32, 16, 12, 3)))
+
+    # one batch dim, equal extents
+    A, B = CuArray(rand(Float32, 32, 16, 4)), CuArray(rand(Float32, 16, 24, 4))
+    c = compile((a, b) -> a ⊠ b, A, B)
+    @test Array(c(A, B)) ≈ ref_bmm(Array(A), Array(B)) rtol=1e-2 atol=1e-2
+
+    # missing batch dims count as 1: shared weights against a batch
     W, X = CuArray(rand(Float32, 32, 16)), CuArray(rand(Float32, 16, 24, 4))
-    c = compile((w, x) -> w * x, W, X)
-    got = Array(c(W, X))
-    for k in 1:4
-        @test got[:, :, k] ≈ Array(W) * Array(X)[:, :, k] rtol=1e-2 atol=1e-2
+    cw = compile((w, x) -> w ⊠ x, W, X)
+    @test Array(cw(W, X)) ≈ ref_bmm(Array(W), Array(X)) rtol=1e-2 atol=1e-2
+
+    # eager tier allocates and jits; mutating tier writes the destination
+    @test Array(Stiletto.batched_mul(A, B)) ≈ ref_bmm(Array(A), Array(B)) rtol=1e-2 atol=1e-2
+    C = CuArray(zeros(Float32, 32, 24, 4))
+    @test Stiletto.batched_mul!(C, A, B) === C
+    @test Array(C) ≈ ref_bmm(Array(A), Array(B)) rtol=1e-2 atol=1e-2
+
+    # traced mutating form
+    fill!(C, 0f0)
+    cm = compile((c, a, b) -> (Stiletto.batched_mul!(c, a, b); nothing), C, A, B)
+    cm(C, A, B)
+    @test Array(C) ≈ ref_bmm(Array(A), Array(B)) rtol=1e-2 atol=1e-2
+
+    # NNlib's verbs route onto the traced matmul, including batched_transpose
+    A4, B4 = CuArray(rand(Float32, 16, 8, 4)), CuArray(rand(Float32, 16, 12, 4))
+    cn = compile((a, b) -> NNlib.batched_mul(NNlib.batched_transpose(a), b), A4, B4)
+    @test Array(cn(A4, B4)) ≈
+          ref_bmm(permutedims(Array(A4), (2, 1, 3)), Array(B4)) rtol=1e-2 atol=1e-2
+
+    # multiple batch dims trace and build, but engine inventory currently
+    # stops at rank 3; run wherever an engine appears, skip honestly here
+    A5 = CuArray(rand(Float32, 8, 16, 3, 1))
+    B5 = CuArray(rand(Float32, 16, 12, 1, 5))
+    c5 = try
+        compile((a, b) -> Stiletto.batched_mul(a, b), A5, B5)
+    catch err
+        err isa cuDNN.UnsupportedGraphError || rethrow()
+        nothing
     end
+    if c5 === nothing
+        @test_skip false
+    else
+        got = c5(A5, B5)
+        @test size(got) == (8, 12, 3, 5)
+        @test Array(got) ≈ ref_bmm(Array(A5), Array(B5)) rtol=1e-2 atol=1e-2
+    end
+
+    # shape contracts surface at trace time
+    @test_throws DimensionMismatch compile((a, b) -> Stiletto.batched_mul(a, b),
+        CuArray(rand(Float32, 8, 15, 3)), CuArray(rand(Float32, 16, 12, 3)))
+    @test_throws DimensionMismatch compile((a, b) -> Stiletto.batched_mul(a, b),
+        CuArray(rand(Float32, 8, 16, 3)), CuArray(rand(Float32, 16, 12, 4)))
 end
 
 @testset "captured array" begin

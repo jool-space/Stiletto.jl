@@ -16,16 +16,26 @@ default_allocator(::Type{T}, dims::Dims) where {T} = CuArray{T}(undef, dims)
 
 """
     compile(f, args...; io_dtype=Float32, intermediate_dtype=Float32, compute_dtype=Float32,
-            allocator=(T, dims) -> CuArray{T}(undef, dims))
+            allocator=(T, dims) -> CuArray{T}(undef, dims),
+            max_workspace=nothing, deterministic=false, heuristics=nothing)
 
 Trace `f` applied to symbolic stand-ins for `args`, build the resulting cuDNN
 graph, and return a callable. Calling the result with arrays of the same
 shapes as `args` executes the graph and returns outputs obtained from
 `allocator`; in-place assignments (`mul!`, `y .= ...`) write into the
 caller's buffers and allocate nothing.
+
+Engine selection is steerable: `max_workspace` (bytes) caps the workspace a
+plan may demand, `deterministic=true` rejects engines flagged numerically
+nondeterministic, and `heuristics` overrides the heuristic modes consulted
+(a tuple of `cuDNN.cudnnBackendHeurMode_t` values, tried in order). When no
+engine satisfies the constraints, compilation throws
+`cuDNN.UnsupportedGraphError` rather than silently relaxing them.
 """
 function compile(f, args...; io_dtype=Float32, intermediate_dtype=Float32,
-                 compute_dtype=Float32, allocator=default_allocator)
+                 compute_dtype=Float32, allocator=default_allocator,
+                 max_workspace::Union{Nothing,Integer}=nothing,
+                 deterministic::Bool=false, heuristics=nothing)
     tr = Trace()
     # scalar arguments become by-value tensors: runtime inputs rebound per
     # call, not trace-time constants
@@ -69,7 +79,11 @@ function compile(f, args...; io_dtype=Float32, intermediate_dtype=Float32,
             "traced function must return computed values, not inputs"))
         output!(t)
     end
-    build!(g)
+    # cuDNN's select_plan owns the heuristic-mode default; forward it only
+    # when the caller overrides
+    build_kwargs = (; deterministic, max_workspace)
+    heuristics === nothing || (build_kwargs = (; build_kwargs..., heuristics))
+    build!(g; build_kwargs...)
     # explicitly typed outputs (casts) keep their traced eltype; the rest
     # follow io_dtype (the trace knows the Julia type, so no reverse
     # dtype-enum mapping is needed — that map is not extensible)

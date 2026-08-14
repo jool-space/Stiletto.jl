@@ -54,6 +54,8 @@ struct Sdpa                 # scaled dot-product attention (unified SDPA op)
     v::Int
     scale::Int              # Constant node, bound by value at execution
     causal::Bool            # trace-time: bakes a mask subgraph into the graph
+    seq_len_q::Union{Nothing,Int}   # (1,1,1,b) Int32 inputs: per-batch padding mask
+    seq_len_kv::Union{Nothing,Int}
 end
 struct Conv                 # cross-correlation; groups inferred from channels
     x::Int
@@ -89,7 +91,9 @@ noderefs(n::Norm) =
     Tuple(id for id in (n.x, n.scale, n.bias, n.mean, n.inv_variance, n.epsilon)
           if id !== nothing)
 noderefs(n::Cast) = (n.x,)
-noderefs(n::Sdpa) = (n.q, n.k, n.v, n.scale)
+noderefs(n::Sdpa) =
+    Tuple(id for id in (n.q, n.k, n.v, n.scale, n.seq_len_q, n.seq_len_kv)
+          if id !== nothing)
 noderefs(n::Conv) = (n.x, n.w)
 noderefs(n::Resample) = (n.x,)
 noderefs(n::Presented) = (n.src,)

@@ -405,6 +405,47 @@ end
     @test Float32.(Array(cg(Q, CuArray(kg), CuArray(vg)))) ≈
           ref_attention(qh, kg, vg; scale) rtol=2e-2 atol=2e-2
 
+    # varlen: per-batch valid lengths as runtime Int32 inputs (padding mask);
+    # output rows past seq_len_q are undefined, so compare valid regions only
+    function check_valid(o, lq, lkv)
+        for (bi, (nq, nkv)) in enumerate(zip(lq, lkv))
+            @test o[:, :, 1:nq, bi:bi] ≈
+                  ref_attention(qh[:, :, 1:nq, bi:bi], kh[:, :, 1:nkv, bi:bi],
+                                vh[:, :, 1:nkv, bi:bi]; scale) rtol=2e-2 atol=2e-2
+        end
+    end
+    slq, slkv = CuArray(Int32[20, 32]), CuArray(Int32[24, 16])
+    cv = try
+        compile((q, k, v, lq, lkv) ->
+                    Stiletto.attention(q, k, v; seq_len_q=lq, seq_len_kv=lkv),
+                Q, K, V, slq, slkv)
+    catch e
+        e isa cuDNN.UnsupportedGraphError || rethrow()
+        nothing
+    end
+    if cv === nothing
+        @test_skip false
+    else
+        check_valid(Float32.(Array(cv(Q, K, V, slq, slkv))), (20, 32), (24, 16))
+        # raggedness is data: rebinding lengths reuses the built graph
+        check_valid(Float32.(Array(cv(Q, K, V, CuArray(Int32[8, 12]),
+                                      CuArray(Int32[8, 12])))), (8, 12), (8, 12))
+        # eager tier threads the lengths as runtime arguments
+        ov = Stiletto.attention(Q, K, V; seq_len_q=slq, seq_len_kv=slkv)
+        check_valid(Float32.(Array(ov)), (20, 32), (24, 16))
+    end
+
+    # sequence-length contracts surface at trace time
+    @test_throws ArgumentError Stiletto.attention(Q, K, V; seq_len_q=slq)
+    @test_throws ArgumentError compile((q, k, v, l) ->
+        Stiletto.attention(q, k, v; seq_len_kv=l), Q, K, V, slkv)
+    @test_throws ArgumentError compile((q, k, v, lq, lkv) ->
+        Stiletto.attention(q, k, v; seq_len_q=lq, seq_len_kv=lkv),
+        Q, K, V, CuArray([20, 32]), CuArray([24, 16]))   # Int64: no silent convert
+    @test_throws DimensionMismatch compile((q, k, v, lq, lkv) ->
+        Stiletto.attention(q, k, v; seq_len_q=lq, seq_len_kv=lkv),
+        Q, K, V, CuArray(Int32[20, 32, 7]), slkv)
+
     # shape contracts surface at trace time
     @test_throws ArgumentError compile((q, k, v) -> Stiletto.attention(q, k, v),
                                        CuArray(randn(Float16, d, h, s)), K, V)

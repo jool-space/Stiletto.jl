@@ -14,7 +14,7 @@ cuDNN = "02a925ec-e4fe-4b08-9a7e-0d78e3d38ccd"
 [sources]
 BitPacking = {url = "https://github.com/MurrellGroup/BitPacking.jl", rev = "cudnn-ext"}
 CUDACore = {url = "https://github.com/JuliaGPU/CUDA.jl", rev = "main", subdir = "CUDACore"}
-Microscaling = {url = "https://github.com/jool-space/Microscaling.jl", rev = "cudnn-graph-ext"}
+Microscaling = {url = "https://github.com/jool-space/Microscaling.jl", rev = "swizzle-pad"}
 cuDNN = {url = "https://github.com/JuliaGPU/CUDA.jl", rev = "main", subdir = "lib/cudnn"}
 
 [compat]

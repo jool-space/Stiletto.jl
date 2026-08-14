@@ -27,7 +27,7 @@ CUDACore = {url = "https://github.com/JuliaGPU/CUDA.jl", rev = "main", subdir = 
 cuDNN = {url = "https://github.com/JuliaGPU/CUDA.jl", rev = "main", subdir = "lib/cudnn"}
 
 [compat]
-Microscaling = "0.1.1"
+Microscaling = "0.1.2"
 NNlib = "0.9.43"
 SpecialFunctions = "2"
 Statistics = "1.11.1"

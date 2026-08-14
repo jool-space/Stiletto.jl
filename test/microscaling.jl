@@ -5,7 +5,7 @@
 # gemm operands are stored (K, ·) and the left operand is transposed in the
 # traced code.
 
-using Microscaling: BlockscaledArray, Sm1xxArray, sm1xx, elements, scales,
+using Microscaling: BlockscaledArray, F8_4x128Array, f8_4x128, elements, scales,
     Float8_E4M3FN, Float8_E5M2, Float8_E8M0FNU, Float4_E2M1FN
 using BitPacking: NarrowArray
 using cuDNN: Graph, tensor!, scalar!, output!, matmul!, pointwise!, reduction!,
@@ -45,8 +45,8 @@ gpu_elements(a) = eltype(a) === Float4_E2M1FN ?
         C_ref = dequant_ref(w_element, w_scale, block)' *
                 dequant_ref(x_element, x_scale, block)
 
-        W = BlockscaledArray(sm1xx(CuArray(w_scale)), gpu_elements(w_element))
-        X = BlockscaledArray(sm1xx(CuArray(x_scale)), gpu_elements(x_element))
+        W = BlockscaledArray(f8_4x128(CuArray(w_scale)), gpu_elements(w_element))
+        X = BlockscaledArray(f8_4x128(CuArray(x_scale)), gpu_elements(x_element))
 
         c = compile_blockscale((w, x) -> w' * x, W, X)
         @test (c !== nothing) == blockscale_claimed
@@ -55,7 +55,7 @@ gpu_elements(a) = eltype(a) === Float4_E2M1FN ?
 
         # a compiled graph rebinds to new storage of the same shapes
         w_element2 = ElemW.(randn(Float32, K, M))
-        W2 = BlockscaledArray(sm1xx(CuArray(w_scale)), gpu_elements(w_element2))
+        W2 = BlockscaledArray(f8_4x128(CuArray(w_scale)), gpu_elements(w_element2))
         @test Array(c(W2, X)) ≈
               dequant_ref(w_element2, w_scale, block)' *
               dequant_ref(x_element, x_scale, block) rtol=1e-4 atol=1e-4
@@ -76,8 +76,8 @@ if blockscale_claimed
     C_ref = dequant_ref(w_element, w_scale, block)' *
             dequant_ref(x_element, x_scale, block)
 
-    W = BlockscaledArray(sm1xx(CuArray(w_scale)), CuArray(w_element))
-    X = BlockscaledArray(sm1xx(CuArray(x_scale)), CuArray(x_element))
+    W = BlockscaledArray(f8_4x128(CuArray(w_scale)), CuArray(w_element))
+    X = BlockscaledArray(f8_4x128(CuArray(x_scale)), CuArray(x_element))
 
     # quantized weights close over the traced function like any array capture
     layer = x -> W' * x
@@ -103,8 +103,8 @@ end
     C_ref = dequant_ref(w_element, w_scale, block)' *
             dequant_ref(x_element, x_scale, block)
 
-    W = BlockscaledArray(sm1xx(CuArray(w_scale)), CuArray(w_element))
-    X = BlockscaledArray(sm1xx(CuArray(x_scale)), CuArray(x_element))
+    W = BlockscaledArray(f8_4x128(CuArray(w_scale)), CuArray(w_element))
+    X = BlockscaledArray(f8_4x128(CuArray(x_scale)), CuArray(x_element))
     b = CuArray(rand(Float32, M))
 
     # engine support for fusing an epilogue onto the dequantize→matmul graph
@@ -152,10 +152,10 @@ end
     C_ref = dequant_ref(w_element, w_scale, block)' *
             dequant_ref(x_element, x_scale, block)
 
-    W = BlockscaledArray(sm1xx(CuArray(w_scale)), CuArray(w_element))
-    X = BlockscaledArray(sm1xx(CuArray(x_scale)), CuArray(x_element))
+    W = BlockscaledArray(f8_4x128(CuArray(w_scale)), CuArray(w_element))
+    X = BlockscaledArray(f8_4x128(CuArray(x_scale)), CuArray(x_element))
     D = BlockscaledArray(
-        Sm1xxArray(CuArray{Scale}(undef, 4, 4, 32, (M ÷ block) ÷ 4, N ÷ 128)),
+        F8_4x128Array(CuArray{Scale}(undef, 4, 4, 32, (M ÷ block) ÷ 4, N ÷ 128)),
         CuArray{Element}(undef, M, N))
 
     # measured supported on sm_121 / cuDNN 9.24
@@ -170,7 +170,7 @@ end
     P = 128
     w2_element = Element.(randn(Float32, M, P))
     w2_scale = Scale.(rand(Float32, M ÷ block, P) / √M)
-    W2 = BlockscaledArray(sm1xx(CuArray(w2_scale)), CuArray(w2_element))
+    W2 = BlockscaledArray(f8_4x128(CuArray(w2_scale)), CuArray(w2_element))
     Y = jit((d, w) -> d' * w, D, W2)
     hq = Float32.(Array(copy(D)))   # layer 2 consumes the quantized activation
     @test Array(Y) ≈ hq' * dequant_ref(w2_element, w2_scale, block) rtol=1e-2 atol=1e-2
@@ -204,14 +204,14 @@ end
     dh, hh, s, b = 64, 4, 32, 4   # s·b ≥ 128: the scale swizzle tiles 128 wide
     D, N = dh * hh, s * b
     quantized(dims...) = BlockscaledArray(
-        sm1xx(CuArray(Scale.(rand(Float32, dims[1] ÷ blk, dims[2:end]...) / √D))),
+        f8_4x128(CuArray(Scale.(rand(Float32, dims[1] ÷ blk, dims[2:end]...) / √D))),
         CuArray(Element.(randn(Float32, dims...))))
     Wq, Wk, Wv, X = quantized(D, D), quantized(D, D), quantized(D, D), quantized(D, N)
     Wo = CuArray(randn(Float16, D, D) ./ √Float16(D))
     qb, kb, vb, y = (CuArray(zeros(Float16, D, N)) for _ in 1:4)
     O = CuArray(zeros(Float16, dh, hh, s, b))
 
-    # the Sm1xxArray broadcast linearizes the swizzled scales to logical shape
+    # the SwizzledArray broadcast linearizes the swizzled scales to logical shape
     dq(A) = dequant_ref(Array(elements(A)), Array(Float32.(scales(A))), blk)
 
     proj!(d, w, x) = (d .= w' * x; nothing)
@@ -252,7 +252,7 @@ end
     end
 
     # note: block-scaled attention inputs (cuDNN's MXFP8 attention recipe)
-    # are constructible — BHSD storage puts the sequence axis on sm1xx's
+    # are constructible — BHSD storage puts the sequence axis on the swizzle's
     # 128-tile dimension, presented head-major — and dequant→SDPA graphs
     # finalize with those strides, but no engine takes them on sm_121/9.24
     # in any mode probed; the frontend recipe lowers to a composed fMHA
@@ -288,8 +288,9 @@ end
     ks = tensor!(g; dims=(sc, s, hh, b), strides=(1, sc, sc * s, sc * s * hh),
                  dtype=Scale, name="K.scale", reordering=CUDNN_TENSOR_REORDERING_F8_128x4)
     ve = tensor!(g; dims=(s, d, hh, b), strides=(d, 1, ds, dsh), dtype=Element, name="V")
-    vs = tensor!(g; dims=(s ÷ blk, d, hh, b),
-                 strides=(d, 1, d * (s ÷ blk), d * (s ÷ blk) * hh),
+    # V blocks the sequence dim; tile roles are positional (fastest dim pads
+    # to 4, second-fastest to 128), so the s÷32 = 8 scale rows pad to 128
+    vs = tensor!(g; dims=(128, d, hh, b), strides=(d, 1, d * 128, d * 128 * hh),
                  dtype=Scale, name="V.scale", reordering=CUDNN_TENSOR_REORDERING_F8_128x4)
 
     qd = block_scale_dequantize!(g, qe, qs; block_size=blk, name="Qd")
@@ -325,18 +326,18 @@ end
     else
         qeh, keh, veh = (Element.(randn(Float32, d, s, hh, b)) for _ in 1:3)
         qsh, ksh = (Scale.(rand(Float32, sc, s, hh, b) / √d) for _ in 1:2)
-        vsh = Scale.(rand(Float32, s ÷ blk, d, hh, b) / √d)
+        vsh = Scale.(rand(Float32, d, s ÷ blk, hh, b) / √d)  # natural (4-axis, 128-axis)
         Oa = CuArray(zeros(Float16, s, d, hh, b))
-        execute!(g, qe => CuArray(qeh), qs => sm1xx(CuArray(qsh)),
-                    ke => CuArray(keh), ks => sm1xx(CuArray(ksh)),
-                    ve => CuArray(veh), vs => sm1xx(CuArray(vsh)),
+        execute!(g, qe => CuArray(qeh), qs => f8_4x128(CuArray(qsh)),
+                    ke => CuArray(keh), ks => f8_4x128(CuArray(ksh)),
+                    ve => CuArray(veh), vs => f8_4x128(CuArray(vsh)),  # s-blocks auto-pad to a whole tile
                     attn_scale => inv(sqrt(Float32(d))), scale_s => 256f0, O => Oa)
         # reference with the fixed-256 fp8 P model
         dq4(el, sf, bdim) = Float32.(el) .*
             repeat(Float32.(sf); inner=ntuple(i -> i == bdim ? blk : 1, 4))
         Qd = dq4(qeh, qsh, 1)
         Kd = dq4(keh, ksh, 1)
-        Vd = dq4(veh, permutedims(vsh, (2, 1, 3, 4)), 2)
+        Vd = dq4(veh, vsh, 2)
         for bi in 1:b, hi in 1:hh
             Sm = inv(sqrt(Float32(d))) .* (Qd[:, :, hi, bi]' * Kd[:, :, hi, bi])
             Pm = mapslices(r -> (w = exp.(r .- maximum(r)); w ./ sum(w)), Sm; dims=2)

@@ -569,6 +569,65 @@ end
     @test_throws DimensionMismatch compile((v, b) -> reshape(v, 5, :) * b, v, B)
 end
 
+@testset "permuted outputs" begin
+    # cuDNN has no permute op, but an output tensor may be declared with
+    # permuted strides: the producing op's epilogue write IS the permute
+    A, B = CuArray(rand(Float32, 24, 48)), CuArray(rand(Float32, 48, 16))
+    c = compile((a, b) -> permutedims(a * b), A, B)
+    out = c(A, B)
+    @test size(out) == (16, 24)
+    @test Array(out) ≈ permutedims(Array(A) * Array(B)) rtol=1e-2 atol=1e-2
+
+    # transpose/adjoint of a computed matrix are the same boundary
+    c2 = compile((a, b) -> (a * b)', A, B)
+    @test Array(c2(A, B)) ≈ (Array(A) * Array(B))' rtol=1e-2 atol=1e-2
+
+    # batched: transposing the matrix dims keeps the batch outermost
+    A3, B3 = CuArray(rand(Float32, 8, 16, 6)), CuArray(rand(Float32, 16, 12, 6))
+    C3 = stack([Array(A3)[:, :, i] * Array(B3)[:, :, i] for i in 1:6])
+    c3 = compile((a, b) -> permutedims(a ⊠ b, (2, 1, 3)), A3, B3)
+    out3 = c3(A3, B3)
+    @test size(out3) == (12, 8, 6)
+    @test Array(out3) ≈ permutedims(C3, (2, 1, 3)) rtol=1e-2 atol=1e-2
+
+    # batch-innermost output layouts are a silent-corruption hazard: the
+    # heuristic accepts them but the kernel writes garbage (probed 2026-08,
+    # sm_121/9.24) — encoded broken until an engine computes them correctly
+    cb = compile((a, b) -> permutedims(a ⊠ b, (3, 1, 2)), A3, B3)
+    @test_broken Array(cb(A3, B3)) ≈ permutedims(C3, (3, 1, 2)) rtol=1e-2 atol=1e-2
+
+    # permuted in-place destination: the caller's buffer takes the layout
+    O = CuArray(zeros(Float32, 16, 24))
+    c4 = compile((o, a, b) -> (o .= permutedims(a * b); nothing), O, A, B)
+    c4(O, A, B)
+    @test Array(O) ≈ permutedims(Array(A) * Array(B)) rtol=1e-2 atol=1e-2
+
+    # a pointwise epilogue may produce the permuted output; engines decide
+    c5 = try
+        compile((a, b) -> permutedims(relu.(a * b)), A, B)
+    catch e
+        e isa cuDNN.UnsupportedGraphError || rethrow()
+        nothing
+    end
+    if c5 === nothing
+        @test_skip false
+    else
+        @test Array(c5(A, B)) ≈ permutedims(max.(Array(A) * Array(B), 0f0)) rtol=1e-2 atol=1e-2
+    end
+
+    # boundary only: a permuted computed value cannot feed further ops
+    @test_throws ArgumentError compile((a, b) -> permutedims(a * b) .+ 1f0, A, B)
+    # ... and must be the value's only use
+    @test_throws ArgumentError compile((a, b) -> (y = a * b; (y, permutedims(y))), A, B)
+    @test_throws ArgumentError compile((a, b) -> (y = a * b; (permutedims(y), y)), A, B)
+    # a value written in place cannot also be returned permuted
+    @test_throws ArgumentError compile((c, a, b) -> permutedims(mul!(c, a, b)),
+                                       CuArray(zeros(Float32, 24, 16)), A, B)
+    # reshaped inputs and constants have no producing op to re-lay them out
+    @test_throws ArgumentError compile((v, b) -> permutedims(reshape(v, 4, :)),
+                                       CuArray(rand(Float32, 16)), B)
+end
+
 @testset "generic dispatch" begin
     # ::AbstractArray-constrained code accepts traced values directly
     f(x::AbstractArray, y::AbstractMatrix) = x * y .+ one(eltype(x))
@@ -725,8 +784,8 @@ end
 
 @testset "errors" begin
     A, B = CuArray(rand(Float32, 8, 8)), CuArray(rand(Float32, 8, 8))
-    # computed values have fixed layout
-    @test_throws ArgumentError compile((a, b) -> (a * b)', A, B)
+    # a permuted computed value materializes at the output boundary only
+    @test_throws ArgumentError compile((a, b) -> (a * b)' * a, A, B)
     # returning an input is not a graph
     @test_throws ArgumentError compile((a, b) -> a, A, B)
     # unmapped function

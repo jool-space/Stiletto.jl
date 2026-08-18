@@ -64,6 +64,12 @@ function compile(f, args...; io_dtype=Float32, intermediate_dtype=Float32,
             "an input written in place is read afterwards; " *
             "use the assigned value instead of the original input"))
     end
+    # a permuted computed value is a materialized output, not a graph value
+    for node in tr.nodes, r in noderefs(node)
+        tr.nodes[r] isa Permuted && throw(ArgumentError(
+            "a permuted computed value materializes at the output boundary " *
+            "and cannot feed further operations"))
+    end
 
     R = graph_rank(tr)
     g = Graph(; io_dtype, intermediate_dtype, compute_dtype)
@@ -72,9 +78,14 @@ function compile(f, args...; io_dtype=Float32, intermediate_dtype=Float32,
     for id in keys(tr.destinations)   # writes execute even when not returned
         tf(id)
     end
+    seen = Set{Tensor}()   # mutable struct: hashed by identity
     for o in outputs
         t = tf(o.id)
         haskey(tr.destinations, o.id) && continue  # already a bound output
+        t in seen && throw(ArgumentError(
+            "the same computed value cannot be returned twice, permuted or not"))
+        push!(seen, t)
+        t.output && continue  # declared an output at emission (permuted layout)
         t.virtual || throw(ArgumentError(
             "traced function must return computed values, not inputs"))
         output!(t)
@@ -108,8 +119,10 @@ struct TensorFor
     tensors::Vector{Union{Nothing,Tensor}}
     rank::Int
     extra::IdDict{Tensor,Any}   # emit! may record bindings for op-internal inputs
+    dests::Dict{Int,Tensor}     # pre-built destination tensors (permuted outputs)
 end
-TensorFor(g, trace, tensors, rank) = TensorFor(g, trace, tensors, rank, IdDict{Tensor,Any}())
+TensorFor(g, trace, tensors, rank) =
+    TensorFor(g, trace, tensors, rank, IdDict{Tensor,Any}(), Dict{Int,Tensor}())
 function (tf::TensorFor)(i::Int)
     t = tf.tensors[i]
     t === nothing || return t

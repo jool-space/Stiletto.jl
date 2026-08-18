@@ -32,12 +32,15 @@ function (c::Compiled)(args...)
     for (vid, leafid) in c.trace.destinations
         bindings[c.tensors[vid]] = bindable(destarray(leafid))
     end
+    # outputs allocate their logical shape; the layout check accepts the dense
+    # buffer, and a permuted output's declared strides make the engine write it
+    # dense in the returned axis order
     outs = map(zip(c.outputs, c.output_dims, c.output_eltypes)) do (id, dims, T)
         haskey(c.trace.destinations, id) && return destarray(c.trace.destinations[id])
         t = c.tensors[id]
-        arr = c.allocator(T, Tuple(Int.(t.dims)))
+        arr = c.allocator(T, Tuple(dims))
         bindings[t] = arr
-        reshape(arr, dims...)
+        arr
     end
     execute!(c.graph, bindings)
     return isempty(outs) ? nothing : length(outs) == 1 ? outs[1] : Tuple(outs)

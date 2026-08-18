@@ -21,8 +21,11 @@ function lift_strides(a, R)
 end
 
 # a node with a recorded destination writes straight into that input's buffer:
-# its tensor is a non-virtual output declared with the buffer's layout
+# its tensor is a non-virtual output declared with the buffer's layout; a
+# pre-built destination (permuted output) takes precedence
 function dest_tensor(tf, i)
+    t = get(tf.dests, i, nothing)
+    t === nothing || return t
     leafid = get(tf.trace.destinations, i, nothing)
     leafid === nothing && return nothing
     ex = input_example(tf.trace.nodes[leafid])
@@ -88,6 +91,33 @@ function emit!(g::Graph, tf, i, node::Cast, R)
     return pointwise!(g, CUDNN_POINTWISE_IDENTITY, x; y)
 end
 
+# a permuted computed value materializes at the output boundary: the source
+# op's output tensor is declared non-virtual with strides that lay the buffer
+# out dense in permuted axis order (or with the destination's layout permuted)
+function emit!(g::Graph, tf, i, node::Permuted, R)
+    tf.tensors[node.src] === nothing || throw(ArgumentError(
+        "permutedims of a computed value must be its only use"))
+    haskey(tf.trace.destinations, node.src) && throw(ArgumentError(
+        "a value written in place cannot also be returned in permuted layout"))
+    perm = [node.perm; length(node.perm)+1:R]
+    sdims = lift_dims(node.dims, R)
+    leafid = get(tf.trace.destinations, i, nothing)
+    st = Vector{Int64}(undef, R)
+    if leafid === nothing
+        st[perm] = cumprod([Int64(1); sdims[perm][1:end-1]])
+        t = tensor!(g; dims=sdims, strides=st, output=true, name=nodename(i, node))
+    else
+        ex = input_example(tf.trace.nodes[leafid])
+        st[perm] = lift_strides(ex, R)
+        t = tensor!(g; dims=sdims, strides=st, dtype=eltype(ex), output=true,
+                    name=nodename(i, node))
+    end
+    tf.dests[node.src] = t
+    tf(node.src) === t || throw(ArgumentError(
+        "this operation cannot materialize a permuted output"))
+    return t
+end
+
 function emit!(g::Graph, tf, i, node::Reshaped, R)
     ex = input_example(tf.trace.nodes[node.src])
     return tensor!(g; dims=lift_dims(node.dims, R), dtype=eltype(ex),
@@ -107,5 +137,6 @@ nodename(i, node::Leaf) = "arg$(node.argindex)"
 nodename(i, node::Captured) = "capture$i"
 nodename(i, node::Constant) = "const$i"
 nodename(i, node::Presented) = "perm$i"
+nodename(i, node::Permuted) = "permout$i"
 nodename(i, node::Reshaped) = "reshape$i"
 nodename(i, node) = "node$i"

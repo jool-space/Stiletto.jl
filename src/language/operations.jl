@@ -35,8 +35,10 @@ Base.:*(a::Transpose{<:Any,<:AbstractVector}, b::TracedMatrix) = matmul(capture(
 
 # ## Presentation
 #
-# Permutations are free stride changes, but only on inputs: a computed
-# (virtual) tensor's layout belongs to the fused kernel.
+# Permutations are free stride changes on inputs. A computed (virtual)
+# tensor's layout belongs to the fused kernel mid-graph, but at the output
+# boundary the op that produces it can write a permuted-stride output — the
+# epilogue write is the permute, no extra op.
 
 function presented(t::TracedArray, perm)
     tr = t.trace
@@ -49,9 +51,11 @@ function presented(t::TracedArray, perm)
         return traced(tr, eltype(t), dims, Presented(t.id, permv))
     elseif node isa Presented
         return traced(tr, eltype(t), dims, Presented(node.src, node.perm[permv]))
+    elseif node isa Union{Reshaped,Constant}
+        throw(ArgumentError(
+            "cannot permute a reshaped input or constant; permute the original input"))
     end
-    throw(ArgumentError(
-        "only inputs of the trace can be permuted; computed values have a fixed layout"))
+    return traced(tr, eltype(t), dims, Permuted(t.id, collect(Int, t.dims), permv))
 end
 
 Base.permutedims(t::TracedArray, perm) = presented(t, perm)
@@ -124,8 +128,13 @@ LinearAlgebra.mul!(c::TracedMatrix, a::AbstractMatrix, b::TracedMatrix) =
 LinearAlgebra.mul!(c::TracedMatrix, a::TracedMatrix, b::AbstractMatrix) =
     assign!(c, matmul(a, capture(c.trace, b)))
 
-Base.Broadcast.materialize!(dest::TracedArray, bc::Broadcast.Broadcasted) =
-    assign!(dest, walkbc(dest.trace, bc))
+# `y .= v` lowers to an identity broadcast; unwrap it so already-computed
+# values (including permuted outputs) assign directly instead of copying
+function Base.Broadcast.materialize!(dest::TracedArray, bc::Broadcast.Broadcasted)
+    bc.f === identity && length(bc.args) == 1 && bc.args[1] isa TracedArray &&
+        return Base.Broadcast.materialize!(dest, bc.args[1])
+    return assign!(dest, walkbc(dest.trace, bc))
+end
 # y .= t for an already-computed value assigns it directly, no copy node
 function Base.Broadcast.materialize!(dest::TracedArray, v::TracedArray)
     computed = !(v.trace.nodes[v.id] isa Union{Leaf,Captured,Presented,Constant})

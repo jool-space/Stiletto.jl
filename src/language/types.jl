@@ -22,6 +22,11 @@ struct Reshaped                 # contiguous re-presentation of an input
     src::Int
     dims::Vector{Int}
 end
+struct Permuted                 # computed value materialized in permuted layout
+    src::Int
+    dims::Vector{Int}           # source (pre-permutation) logical dims
+    perm::Vector{Int}
+end
 struct Matmul
     a::Int
     b::Int
@@ -98,6 +103,7 @@ noderefs(n::Conv) = (n.x, n.w)
 noderefs(n::Resample) = (n.x,)
 noderefs(n::Presented) = (n.src,)
 noderefs(n::Reshaped) = (n.src,)
+noderefs(n::Permuted) = (n.src,)
 noderefs(n) = ()
 
 # Subtyping AbstractArray admits TracedArrays into generic ::AbstractArray

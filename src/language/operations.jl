@@ -159,6 +159,26 @@ LinearAlgebra.mul!(c::TracedMatrix, a::AbstractMatrix, b::TracedMatrix) =
 LinearAlgebra.mul!(c::TracedMatrix, a::TracedMatrix, b::AbstractMatrix) =
     assign!(c, matmul(a, capture(c.trace, b)))
 
+# the 5-arg forms fuse α·A·B + β·C into one graph, the scaling and
+# accumulation a pointwise epilogue on the matmul. β = 0 must not read the
+# destination (Base leaves its contents unspecified there); a β ≠ 0 read is
+# created before the write, which the destination model permits, and the
+# epilogue reads the pre-write value. α and β are trace-time constants.
+function scaled_assign!(c::TracedArray, v::TracedArray, α::Number, β::Number)
+    isone(α) || (v = α .* v)
+    iszero(β) || (v = isone(β) ? v .+ c : v .+ β .* c)
+    return assign!(c, v)
+end
+
+LinearAlgebra.mul!(c::TracedMatrix, a::TracedMatrix, b::TracedMatrix,
+                   α::Number, β::Number) = scaled_assign!(c, matmul(a, b), α, β)
+LinearAlgebra.mul!(c::TracedMatrix, a::AbstractMatrix, b::TracedMatrix,
+                   α::Number, β::Number) =
+    scaled_assign!(c, matmul(capture(c.trace, a), b), α, β)
+LinearAlgebra.mul!(c::TracedMatrix, a::TracedMatrix, b::AbstractMatrix,
+                   α::Number, β::Number) =
+    scaled_assign!(c, matmul(a, capture(c.trace, b)), α, β)
+
 # `y .= v` lowers to an identity broadcast; unwrap it so already-computed
 # values (including permuted outputs) assign directly instead of copying
 function Base.Broadcast.materialize!(dest::TracedArray, bc::Broadcast.Broadcasted)

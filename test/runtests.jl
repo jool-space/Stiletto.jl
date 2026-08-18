@@ -207,6 +207,25 @@ end
     cm(C, A, B)
     @test Array(C) ≈ ref_bmm(Array(A), Array(B)) rtol=1e-2 atol=1e-2
 
+    # α/β epilogue on the batched verb: β = 0 never reads the destination
+    # (eager tier, NaN-proof); β = 1 accumulates through the NNlib method
+    fill!(C, NaN32)
+    @test Stiletto.batched_mul!(C, A, B, 2f0, 0f0) === C
+    @test Array(C) ≈ 2 .* ref_bmm(Array(A), Array(B)) rtol=1e-2 atol=1e-2
+    cacc = try
+        compile((c, a, b) -> (NNlib.batched_mul!(c, a, b, 1f0, 1f0); nothing), C, A, B)
+    catch e
+        e isa cuDNN.UnsupportedGraphError || rethrow()
+        nothing
+    end
+    if cacc === nothing
+        @test_skip false
+    else
+        C0 = copy(Array(C))
+        cacc(C, A, B)
+        @test Array(C) ≈ ref_bmm(Array(A), Array(B)) .+ C0 rtol=1e-2 atol=1e-2
+    end
+
     # NNlib's verbs route onto the traced matmul, including batched_transpose
     A4, B4 = CuArray(rand(Float32, 16, 8, 4)), CuArray(rand(Float32, 16, 12, 4))
     cn = compile((a, b) -> NNlib.batched_mul(NNlib.batched_transpose(a), b), A4, B4)
@@ -695,6 +714,34 @@ end
     # returning the assigned value hands back the destination array itself
     c2 = compile((c, a, b) -> mul!(c, a, b), C, A, B)
     @test c2(C, A, B) === C
+
+    # 5-arg mul! fuses α·A·B + β·C as a matmul epilogue. β = 0 must not read
+    # the destination — NaN contents prove it stays unread
+    fill!(C, NaN32)
+    c5 = compile((c, a, b) -> (mul!(c, a, b, 2f0, 0f0); nothing), C, A, B)
+    c5(C, A, B)
+    @test Array(C) ≈ 2 .* (Array(A) * Array(B)) rtol=1e-2 atol=1e-2
+
+    # β ≠ 0 reads the pre-write contents of the aliased buffer (β = 1 is the
+    # gradient-accumulation idiom); engine tolerance for the aliasing is
+    # measured, not contractual, so skip where cuDNN declines
+    c6 = try
+        compile((c, a, b) -> (mul!(c, a, b, 2.5f0, -0.5f0); nothing), C, A, B)
+    catch e
+        e isa cuDNN.UnsupportedGraphError || rethrow()
+        nothing
+    end
+    if c6 === nothing
+        @test_skip false
+    else
+        C0 = copy(Array(C))
+        c6(C, A, B)
+        @test Array(C) ≈ 2.5f0 .* (Array(A) * Array(B)) .- 0.5f0 .* C0 rtol=1e-2 atol=1e-2
+        C0 = copy(Array(C))
+        c7 = compile((c, a, b) -> (mul!(c, a, b, 1f0, 1f0); nothing), C, A, B)
+        c7(C, A, B)
+        @test Array(C) ≈ Array(A) * Array(B) .+ C0 rtol=1e-2 atol=1e-2
+    end
 
     # in-place broadcast assignment into a caller buffer
     Y = CuArray(zeros(Float32, 16, 16))

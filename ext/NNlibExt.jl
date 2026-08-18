@@ -27,8 +27,13 @@ NNlib.batched_mul(a::TracedArray{<:Any,N}, b::AbstractArray{<:Any,N}) where {N} 
 NNlib.batched_mul(a::AbstractArray{<:Any,N}, b::TracedArray{<:Any,N}) where {N} =
     Stiletto.batched_mul(a, b)
 NNlib.batched_mul!(c::TracedArray{<:Any,N}, a::AbstractArray{<:Any,N},
-                   b::AbstractArray{<:Any,N}) where {N} =
-    Stiletto.batched_mul!(c, a, b)
+                   b::AbstractArray{<:Any,N}, α::Number=true, β::Number=false) where {N} =
+    Stiletto.batched_mul!(c, a, b, α, β)
+# rank-3 tiebreaker: NNlib's own α/β method binds the destination eltype,
+# which ties with the rank-generic method above
+NNlib.batched_mul!(c::TracedArray{<:Any,3}, a::AbstractArray{<:Any,3},
+                   b::AbstractArray{<:Any,3}, α::Number=true, β::Number=false) =
+    Stiletto.batched_mul!(c, a, b, α, β)
 
 # batched transpose/adjoint are stride re-presentations of trace inputs
 NNlib.batched_transpose(t::TracedArray) =

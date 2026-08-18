@@ -7,7 +7,7 @@
 
 """
     Stiletto.batched_mul(a, b)
-    Stiletto.batched_mul!(c, a, b)
+    Stiletto.batched_mul!(c, a, b[, α, β])
     a ⊠ b
 
 Batched matrix multiplication `(M, K, batch...) × (K, N, batch...) →
@@ -15,15 +15,19 @@ Batched matrix multiplication `(M, K, batch...) × (K, N, batch...) →
 match or be 1 — missing dimensions count as 1 — and the result takes the
 larger. Unlike `NNlib.batched_mul`, any number of batch dimensions is
 accepted. `⊠` (`\\boxtimes`) is the infix spelling.
+
+The 5-arg form computes `α·A·B + β·C` with the scaling and accumulation
+fused as a matmul epilogue; `β = 0` leaves the destination unread. `α` and
+`β` are trace-time constants — each pair compiles its own plan.
 """
 batched_mul(a::TracedArray, b::TracedArray) = matmul(a, b)
 batched_mul(a::TracedArray, b::AbstractArray) = matmul(a, capture(a.trace, b))
 batched_mul(a::AbstractArray, b::TracedArray) = matmul(capture(b.trace, a), b)
 
-function batched_mul!(c::TracedArray, a, b)
+function batched_mul!(c::TracedArray, a, b, α::Number=true, β::Number=false)
     tr = c.trace
-    return assign!(c, matmul(a isa TracedArray ? a : capture(tr, a),
-                             b isa TracedArray ? b : capture(tr, b)))
+    return scaled_assign!(c, matmul(a isa TracedArray ? a : capture(tr, a),
+                                    b isa TracedArray ? b : capture(tr, b)), α, β)
 end
 
 # ## Eager tier
@@ -36,8 +40,10 @@ function batched_mul(a::AbstractArray, b::AbstractArray)
     return batched_mul!(c, a, b)
 end
 
-function batched_mul!(c::AbstractArray, a, b)
-    jit((c, a, b) -> (batched_mul!(c, a, b); nothing), c, a, b)
+# α/β ride the closure: isbits captures key the plan cache by value, so each
+# coefficient pair is its own specialized graph
+function batched_mul!(c::AbstractArray, a, b, α::Number=true, β::Number=false)
+    jit((c, a, b) -> (batched_mul!(c, a, b, α, β); nothing), c, a, b)
     return c
 end
 

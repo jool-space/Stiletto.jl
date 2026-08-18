@@ -8,6 +8,8 @@
 # negative results (unsupported graphs) cached alongside.
 
 argkey(a::AbstractArray) = (typeof(a), size(a), strides(a))
+# view arguments also key on pointer alignment: the plan bakes it in
+argkey(a::SubArray) = (typeof(a), size(a), strides(a), array_alignment(a))
 argkey(x::Number) = typeof(x)   # scalar arguments rebind by value at each call
 argkey(x) = x
 

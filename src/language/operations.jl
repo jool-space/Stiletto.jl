@@ -99,6 +99,37 @@ end
 iscontiguous(a::AbstractArray) =
     isempty(a) || strides(a) == Tuple(cumprod([1; collect(size(a))[1:end-1]]))
 
+# views of inputs are free stride-and-offset re-presentations: the
+# declaration carries the view's strides, binding offsets the parent's
+# pointer. Computed values stay unsliceable (their layout belongs to the
+# fused kernel), and integer indices are refused rather than dropping
+# dimensions the graph would have to reshape away.
+
+function Base.view(t::TracedArray, idxs...)
+    tr = t.trace
+    length(idxs) == ndims(t) || throw(ArgumentError(
+        "view of a traced value takes one index per dimension"))
+    ranges = map(enumerate(idxs)) do (d, i)
+        # unit steps only: a step on the packed dimension leaves the tensor
+        # with no stride-1 dimension, which engines accept and then fault on
+        r = i isa Colon ? (1:size(t, d)) :
+            i isa AbstractUnitRange ? i :
+            throw(ArgumentError(
+                "traced views take unit ranges or Colon; integer indices drop " *
+                "dimensions and stepped ranges leave no packed dimension"))
+        checkindex(Bool, 1:size(t, d), r) || throw(BoundsError(t, idxs))
+        convert(UnitRange{Int}, r)
+    end
+    node = tr.nodes[t.id]
+    if node isa Sliced   # views compose: reindex the stored ranges
+        return traced(tr, eltype(t), Tuple(length.(ranges)),
+                      Sliced(node.src, [node.ranges[d][ranges[d]] for d in 1:ndims(t)]))
+    end
+    node isa Union{Leaf,Captured} || throw(ArgumentError(
+        "only inputs of the trace can be viewed; computed values have a fixed layout"))
+    return traced(tr, eltype(t), Tuple(length.(ranges)), Sliced(t.id, collect(ranges)))
+end
+
 # ## In-place verbs
 #
 # Mutation is recorded as a destination: the computed value's tensor becomes a

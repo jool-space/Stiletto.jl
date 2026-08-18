@@ -5,6 +5,36 @@
 bindable(a) = a
 bindable(a::Union{PermutedDimsArray,Transpose,Adjoint}) = bindable(parent(a))
 
+# strided views bind by pointer: the declaration carries the view's strides
+# and the parent's storage backs it at an offset. cuDNN's dense layout
+# comparison cannot express that, so route through its public extension
+# point with a wrapper that owns the check.
+struct ViewBinding{V}
+    v::V
+end
+bindable(a::SubArray) = ViewBinding(a)
+
+function cuDNN.checked_array_pointer(t::Tensor, b::ViewBinding)
+    a = b.v
+    cuDNN.cudnnDataType(eltype(a)) == t.dtype || throw(ArgumentError(
+        "binding for $(t.name) has eltype $(eltype(a)), expected $(t.dtype)"))
+    layout(dims, sts) = sort!([(Int64(d), Int64(s)) for (d, s) in zip(dims, sts) if d != 1];
+                              by=last)
+    layout(size(a), strides(a)) == layout(t.dims, t.strides) || throw(DimensionMismatch(
+        "view binding for $(t.name) has size $(size(a)) with strides $(strides(a)), " *
+        "which does not lay out the tensor's $(Tuple(t.dims)) with strides $(Tuple(t.strides))"))
+    p = view_pointer(a)
+    UInt(p) % t.alignment == 0 || throw(ArgumentError(
+        "view binding for $(t.name) is less aligned than the graph was built for; " *
+        "compile with a view of this alignment"))
+    return p
+end
+
+# one input usually binds one tensor; extensions override on the array type
+# when an argument backs several graph tensors (composite arrays whose
+# declaration split them into storage components)
+bind!(g::Graph, bindings, t::Tensor, a) = (bindings[t] = a)
+
 function (c::Compiled)(args...)
     length(args) == c.nargs ||
         throw(ArgumentError("compiled graph takes $(c.nargs) arrays, got $(length(args))"))
@@ -25,6 +55,10 @@ function (c::Compiled)(args...)
             src = c.trace.nodes[node.src]
             arr = bindable(src isa Leaf ? args[src.argindex] : src.array)
             bindings[t] = reshape(arr, node.dims...)
+        elseif node isa Sliced
+            src = c.trace.nodes[node.src]
+            arr = src isa Leaf ? args[src.argindex] : src.array
+            bind!(c.graph, bindings, t, bindable(view(arr, node.ranges...)))
         end
     end
     destarray(leafid) = (leaf = c.trace.nodes[leafid];

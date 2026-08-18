@@ -628,6 +628,45 @@ end
                                        CuArray(rand(Float32, 16)), B)
 end
 
+@testset "view inputs" begin
+    # views of inputs bind by pointer offset with the view's strides — no
+    # copy, no extra op; the vcat'd gate/up split fuses into one graph
+    GU = CuArray(rand(Float32, 32, 24))
+    B  = CuArray(rand(Float32, 24, 8))
+    gu = Array(GU)
+
+    c = compile(x -> tanh.(view(x, 1:16, :)) .* view(x, 17:32, :), GU)
+    @test Array(c(GU)) ≈ tanh.(gu[1:16, :]) .* gu[17:32, :] rtol=1e-5
+
+    # a view feeding matmul
+    c2 = compile((x, b) -> view(x, 1:16, :) * b, GU, B)
+    @test Array(c2(GU, B)) ≈ gu[1:16, :] * Array(B) rtol=1e-2 atol=1e-2
+
+    # column views are pointer offsets too, and views compose
+    c3 = compile(x -> view(view(x, :, 3:20), 5:12, :) .* 2f0, GU)
+    @test Array(c3(GU)) ≈ gu[5:12, 3:20] .* 2 rtol=1e-5
+
+    # odd row offset: alignment is declared from the example and revalidated
+    c5 = compile(x -> view(x, 2:17, :) .* 2f0, GU)
+    @test Array(c5(GU)) ≈ gu[2:17, :] .* 2 rtol=1e-5
+
+    # rebinding new arrays of the same shapes
+    GU2 = CuArray(rand(Float32, 32, 24))
+    @test Array(c(GU2)) ≈ tanh.(Array(GU2)[1:16, :]) .* Array(GU2)[17:32, :] rtol=1e-5
+
+    # view arguments at the call boundary use the same binding path
+    V = view(GU, 1:16, :)
+    c6 = compile((v, b) -> v * b, V, B)
+    @test Array(c6(V, B)) ≈ gu[1:16, :] * Array(B) rtol=1e-2 atol=1e-2
+
+    # computed values have a fixed layout; integer indices drop dimensions;
+    # stepped ranges would leave no packed dimension (engines fault on it)
+    @test_throws ArgumentError compile((x, b) -> view(x * b, 1:8, :) .* 2f0, GU, B)
+    @test_throws ArgumentError compile(x -> view(x, 1, :) .* 2f0, GU)
+    @test_throws ArgumentError compile(x -> view(x, 1:2:31, :) .* 2f0, GU)
+    @test_throws BoundsError compile(x -> view(x, 0:16, :) .* 2f0, GU)
+end
+
 @testset "generic dispatch" begin
     # ::AbstractArray-constrained code accepts traced values directly
     f(x::AbstractArray, y::AbstractMatrix) = x * y .+ one(eltype(x))

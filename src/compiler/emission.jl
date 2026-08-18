@@ -129,9 +129,21 @@ function emit!(g::Graph, tf, i, node::Presented, R)
     return declare(g, i, node, ex, R)
 end
 
+emit!(g::Graph, tf, i, node::Sliced, R) =
+    declare(g, i, node, view(input_example(tf.trace.nodes[node.src]), node.ranges...), R)
+
 declare(g::Graph, i, node, ex, R) =
     tensor!(g; dims=lift_dims(size(ex), R), strides=lift_strides(ex, R),
-            dtype=eltype(ex), name=nodename(i, node))
+            dtype=eltype(ex), alignment=array_alignment(ex), name=nodename(i, node))
+
+# a view's pointer is offset from its parent's allocation, so the usual
+# 16-byte assumption may not hold; declare what the example actually has
+array_alignment(ex) = 16
+array_alignment(ex::SubArray) = min(16, 1 << trailing_zeros(UInt(view_pointer(ex))))
+
+# offset pointer computed from the parent, which every array type can produce
+view_pointer(a::SubArray) =
+    pointer(parent(a), LinearIndices(parent(a))[map(first, parentindices(a))...])
 
 nodename(i, node::Leaf) = "arg$(node.argindex)"
 nodename(i, node::Captured) = "capture$i"
@@ -139,4 +151,5 @@ nodename(i, node::Constant) = "const$i"
 nodename(i, node::Presented) = "perm$i"
 nodename(i, node::Permuted) = "permout$i"
 nodename(i, node::Reshaped) = "reshape$i"
+nodename(i, node::Sliced) = "view$i"
 nodename(i, node) = "node$i"

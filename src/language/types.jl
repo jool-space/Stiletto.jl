@@ -27,6 +27,10 @@ struct Permuted                 # computed value materialized in permuted layout
     dims::Vector{Int}           # source (pre-permutation) logical dims
     perm::Vector{Int}
 end
+struct Sliced                   # contiguous-range view of an input: binds by pointer offset
+    src::Int
+    ranges::Vector{UnitRange{Int}}
+end
 struct Matmul
     a::Int
     b::Int
@@ -104,6 +108,7 @@ noderefs(n::Resample) = (n.x,)
 noderefs(n::Presented) = (n.src,)
 noderefs(n::Reshaped) = (n.src,)
 noderefs(n::Permuted) = (n.src,)
+noderefs(n::Sliced) = (n.src,)
 noderefs(n) = ()
 
 # Subtyping AbstractArray admits TracedArrays into generic ::AbstractArray

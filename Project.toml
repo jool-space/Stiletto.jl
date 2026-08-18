@@ -22,14 +22,11 @@ MicroscalingExt = "Microscaling"
 NNlibExt = "NNlib"
 SpecialFunctionsExt = "SpecialFunctions"
 
-[sources]
-CUDACore = {url = "https://github.com/JuliaGPU/CUDA.jl", rev = "main", subdir = "CUDACore"}
-cuDNN = {url = "https://github.com/JuliaGPU/CUDA.jl", rev = "main", subdir = "lib/cudnn"}
-
 [compat]
+CUDACore = "6.3"
 Microscaling = "0.1.2"
 NNlib = "0.9.43"
 SpecialFunctions = "2"
 Statistics = "1.11.1"
-cuDNN = "6.2"
+cuDNN = "6.3"
 julia = "1.11"

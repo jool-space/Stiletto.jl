@@ -18,7 +18,13 @@ function matmul_epilogue(a::AbstractMatrix, b::AbstractMatrix)
     sum(tanh.(transpose(a) * b / √K), dims=1)
 end
 
-C = @jit matmul_epilogue(A, B)   # 1×32 CuArray
+C = @jit matmul_epilogue(A, B)   # 1×32 CuArray, 1 allocation
+
+function matmul_epilogue!(c::AbstractMatrix, a::AbstractMatrix, b::AbstractMatrix)
+    c .= matmul_epilogue(a, b)
+end
+
+@jit matmul_epilogue!(C, A, B)   # 0 allocations
 ```
 
 Stiletto will try to run any graph supported by cuDNN, but not all graphs will run

@@ -9,6 +9,7 @@ module Stiletto
 # singleton dimensions, which is free for column-major storage.
 
 using CUDACore: CuArray
+using CompilerCaching: CompilerCaching, CacheView
 using LinearAlgebra: LinearAlgebra, Transpose, Adjoint
 using Statistics: Statistics
 using cuDNN: cuDNN, Graph, Tensor, tensor!, scalar!, output!, matmul!, pointwise!,

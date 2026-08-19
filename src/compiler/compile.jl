@@ -15,7 +15,7 @@ end
 default_allocator(::Type{T}, dims::Dims) where {T} = CuArray{T}(undef, dims)
 
 """
-    compile(f, args...; io_dtype=Float32, intermediate_dtype=Float32, compute_dtype=Float32,
+    compile(f, args...; io_dtype=nothing, intermediate_dtype=Float32, compute_dtype=Float32,
             allocator=(T, dims) -> CuArray{T}(undef, dims),
             max_workspace=nothing, deterministic=false, heuristics=nothing)
 
@@ -25,6 +25,12 @@ shapes as `args` executes the graph and returns outputs obtained from
 `allocator`; in-place assignments (`mul!`, `y .= ...`) write into the
 caller's buffers and allocate nothing.
 
+Output element types follow Julia's promotion of the traced computation, so
+compiled code returns what the plain code would (explicit casts like
+`Float16.(x)` included). Passing `io_dtype` overrides that as a precision
+policy: every non-cast output is declared and allocated at `io_dtype`,
+regardless of what scalar constants promote the trace to.
+
 Engine selection is steerable: `max_workspace` (bytes) caps the workspace a
 plan may demand, `deterministic=true` rejects engines flagged numerically
 nondeterministic, and `heuristics` overrides the heuristic modes consulted
@@ -32,7 +38,7 @@ nondeterministic, and `heuristics` overrides the heuristic modes consulted
 engine satisfies the constraints, compilation throws
 `cuDNN.UnsupportedGraphError` rather than silently relaxing them.
 """
-function compile(f, args...; io_dtype=Float32, intermediate_dtype=Float32,
+function compile(f, args...; io_dtype=nothing, intermediate_dtype=Float32,
                  compute_dtype=Float32, allocator=default_allocator,
                  max_workspace::Union{Nothing,Integer}=nothing,
                  deterministic::Bool=false, heuristics=nothing)
@@ -72,7 +78,8 @@ function compile(f, args...; io_dtype=Float32, intermediate_dtype=Float32,
     end
 
     R = graph_rank(tr)
-    g = Graph(; io_dtype, intermediate_dtype, compute_dtype)
+    g = Graph(; io_dtype = something(io_dtype, Float32), intermediate_dtype,
+              compute_dtype)
     tensors = Vector{Union{Nothing,Tensor}}(nothing, length(tr.nodes))
     tf = TensorFor(g, tr, tensors, R)
     for id in keys(tr.destinations)   # writes execute even when not returned
@@ -90,16 +97,27 @@ function compile(f, args...; io_dtype=Float32, intermediate_dtype=Float32,
             "traced function must return computed values, not inputs"))
         output!(t)
     end
+    # explicitly typed outputs (casts) keep their traced eltype. The rest
+    # keep Julia's promotion — the traced eltype, declared here so the
+    # graph writes what plain code would return — unless the caller passed
+    # io_dtype, which is a precision-policy override. Decided before build!,
+    # which resolves deferred dtypes in place: afterwards the cast/non-cast
+    # distinction is gone. Either way allocation matches the declaration;
+    # the trace knows the Julia type, so no reverse dtype-enum mapping is
+    # needed — that map is not extensible.
+    eltypes = map(outputs) do o
+        t = tensors[o.id]
+        t.dtype === nothing || return eltype(o)              # cast
+        io_dtype === nothing || return io_dtype              # explicit policy
+        t.dtype = cuDNN.cudnnDataType(eltype(o))             # Base promotion
+        return eltype(o)
+    end
+    eltypes = DataType[eltypes...]
     # cuDNN's select_plan owns the heuristic-mode default; forward it only
     # when the caller overrides
     build_kwargs = (; deterministic, max_workspace)
     heuristics === nothing || (build_kwargs = (; build_kwargs..., heuristics))
     build!(g; build_kwargs...)
-    # explicitly typed outputs (casts) keep their traced eltype; the rest
-    # follow io_dtype (the trace knows the Julia type, so no reverse
-    # dtype-enum mapping is needed — that map is not extensible)
-    eltypes = DataType[tensors[o.id].dtype === nothing ? io_dtype : eltype(o)
-                       for o in outputs]
     # examples are only needed during emission; binding uses the call's
     # arguments, so don't keep the trace-time arrays alive (cached Compiled
     # objects would pin them indefinitely)

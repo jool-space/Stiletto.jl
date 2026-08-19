@@ -10,11 +10,12 @@ Traces plain Julia array code into fused [cuDNN graphs](https://docs.nvidia.com/
 ```julia
 using Stiletto, CUDA
 
-A = CUDA.randn(Float32, 48, 64)
-B = CUDA.randn(Float32, 48, 32)
+M, N, K = 64, 32, 48
+A = CUDA.randn(Float32, K, M)
+B = CUDA.randn(Float32, K, N)
 
 function matmul_epilogue(a::AbstractMatrix, b::AbstractMatrix)
-    tanh.(transpose(a) * b)
+    tanh.(transpose(a) * b / √K)
 end
 
 C = @jit matmul_epilogue(A, B)   # 64×32 CuArray

@@ -119,4 +119,12 @@ function Stiletto.quantize!(dest::BlockscaledArray, x::AbstractArray)
     return dest
 end
 
+# `c .= x` (and `mul!(c, a, b)`) into a block-scaled destination: the store
+# IS the quantization — the composite answers "quantize to what?", carrying
+# block size, dtypes, and the swizzled scale layout — so assignment routes
+# onto the Quantize node. Partial writes stay refused: block scales couple
+# elements, so only whole-array stores have a meaning.
+Stiletto.store!(::BlockscaledArray, dest::TracedArray, v::TracedArray) =
+    Stiletto.quantize!(dest, v)
+
 end

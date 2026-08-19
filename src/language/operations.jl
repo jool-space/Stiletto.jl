@@ -154,6 +154,18 @@ function assign!(dest::TracedArray, v::TracedArray)
     return v
 end
 
+# how a value is stored is the destination's to decide — Base's semantics
+# for any assignment. The default is the plain buffer write; extensions
+# override on the destination input's example type (a block-scaled
+# destination stores by quantization, so `c .= x` IS the quantize).
+store!(dest::TracedArray, v::TracedArray) = store!(dest_example(dest), dest, v)
+store!(::Any, dest::TracedArray, v::TracedArray) = assign!(dest, v)
+
+function dest_example(dest::TracedArray)
+    node = dest.trace.nodes[dest.id]
+    return node isa Union{Leaf,Captured} ? input_example(node) : nothing
+end
+
 # the 5-arg forms fuse α·A·B + β·C into one graph, the scaling and
 # accumulation a pointwise epilogue on the matmul. β = 0 must not read the
 # destination (Base leaves its contents unspecified there); a β ≠ 0 read is
@@ -162,7 +174,7 @@ end
 function scaled_assign!(c::TracedArray, v::TracedArray, α::Number, β::Number)
     isone(α) || (v = α .* v)
     iszero(β) || (v = isone(β) ? v .+ c : v .+ β .* c)
-    return assign!(c, v)
+    return store!(c, v)
 end
 
 # `LinearAlgebra.mul!` on a traced destination is the library verb
@@ -182,12 +194,12 @@ LinearAlgebra.mul!(y::TracedVector, a::AbstractMatrix, x::AbstractVector,
 function Base.Broadcast.materialize!(dest::TracedArray, bc::Broadcast.Broadcasted)
     bc.f === identity && length(bc.args) == 1 && bc.args[1] isa TracedArray &&
         return Base.Broadcast.materialize!(dest, bc.args[1])
-    return assign!(dest, walkbc(dest.trace, bc))
+    return store!(dest, walkbc(dest.trace, bc))
 end
 # y .= t for an already-computed value assigns it directly, no copy node
 function Base.Broadcast.materialize!(dest::TracedArray, v::TracedArray)
     computed = !(v.trace.nodes[v.id] isa Union{Leaf,Captured,Presented,Constant})
-    return assign!(dest, computed ? v : pointwise(identity, v))
+    return store!(dest, computed ? v : pointwise(identity, v))
 end
 
 # ## Reductions

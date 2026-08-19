@@ -17,6 +17,12 @@ into the graph — cuDNN's engines support quantize fused after a matmul
 (`quantize!(dest, w' * x)`), the full narrow-precision pipeline in one
 kernel.
 
+Assignment into a block-scaled destination is the same store — quantization
+is how the destination stores values — so traced `dest .= x` and
+`mul!(dest, a, b)` route here. Partial writes (`view(dest, ...) .= x`) are
+refused: block scales couple elements, so only whole-array stores have a
+meaning.
+
 Requires the Microscaling extension (`using Microscaling`).
 """
 function quantize! end

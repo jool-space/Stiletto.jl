@@ -177,6 +177,23 @@ end
     hq = Float32.(Array(copy(D)))   # layer 2 consumes the quantized activation
     @test Array(Y) ≈ hq' * dequant_ref(w2_element, w2_scale, block) rtol=1e-2 atol=1e-2
 
+    # assignment into a block-scaled destination is the same store:
+    # quantization is how the destination stores values, so `.=` and `mul!`
+    # route onto the Quantize node
+    D2 = BlockscaledArray(
+        F8_4x128Array(CuArray{Scale}(undef, 4, 4, 32, (M ÷ block) ÷ 4, N ÷ 128)),
+        CuArray{Element}(undef, M, N))
+    c2 = compile((d, w, x) -> (d .= w' * x), D2, W, X)
+    c2(D2, W, X)
+    @test Float32.(Array(copy(D2))) ≈ C_ref rtol=0.15 atol=0.15
+    c3 = compile((d, w, x) -> mul!(d, w', x), D2, W, X)
+    c3(D2, W, X)
+    @test Float32.(Array(copy(D2))) ≈ C_ref rtol=0.15 atol=0.15
+
+    # partial writes have no meaning under shared block scales
+    @test_throws ArgumentError compile(
+        (d, w, x) -> (view(d, 1:M, 1:N) .= w' * x; nothing), D2, W, X)
+
     # standalone quantize (input, nothing to fuse with) is engine inventory;
     # skip rather than claim
     xd = CuArray(randn(Float32, M, N))

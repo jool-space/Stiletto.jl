@@ -140,9 +140,10 @@ Stiletto.quantize!
 - **SpecialFunctions** — `erf` traces as a pointwise mode.
 - **Microscaling** — `BlockscaledArray` arguments trace like any array,
   declaring element and swizzled-scale tensors joined by a dequantize node
-  and binding their storage components at execution; `quantize!` fuses
-  block-scale quantization onto computed values, writing into a composite's
-  storage.
+  and binding their storage components at execution. Assignment into a
+  composite destination (`c .= w' * x`, `mul!(c, a, b)`, or the explicit
+  [`Stiletto.quantize!`](@ref)) fuses block-scale quantization onto the
+  computed value — quantization is how the destination stores values.
 
 ## Index
 

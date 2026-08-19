@@ -774,6 +774,50 @@ end
                                            CuArray(zeros(Float32, 8, 8)), A, B)
 end
 
+@testset "Stiletto.mul!" begin
+    A, B = CuArray(rand(Float32, 32, 16)), CuArray(rand(Float32, 16, 24))
+    C = CuArray(zeros(Float32, 32, 24))
+
+    # eager tier jits the graph and returns the destination
+    @test Stiletto.mul!(C, A, B) === C
+    @test Array(C) ≈ Array(A) * Array(B) rtol=1e-2 atol=1e-2
+
+    # β = 0 leaves the destination unread (NaN contents prove it)
+    fill!(C, NaN32)
+    Stiletto.mul!(C, A, B, 2f0, 0f0)
+    @test Array(C) ≈ 2 .* (Array(A) * Array(B)) rtol=1e-2 atol=1e-2
+
+    # traced tier: the qualified verb and LinearAlgebra.mul! trace identically
+    fill!(C, 0f0)
+    cm = compile((c, a, b) -> (Stiletto.mul!(c, a, b); nothing), C, A, B)
+    cm(C, A, B)
+    @test Array(C) ≈ Array(A) * Array(B) rtol=1e-2 atol=1e-2
+
+    # a traced destination claims plain operands: both get captured
+    fill!(C, 0f0)
+    cc = compile(c -> (mul!(c, A, B); nothing), C)
+    cc(C)
+    @test Array(C) ≈ Array(A) * Array(B) rtol=1e-2 atol=1e-2
+
+    # gemv: the (K,) operand and (M,) product declare as K×1 and M×1
+    x = CuArray(rand(Float32, 16))
+    y = CuArray(zeros(Float32, 32))
+    @test Stiletto.mul!(y, A, x) === y
+    @test Array(y) ≈ Array(A) * Array(x) rtol=1e-2 atol=1e-2
+
+    # traced gemv through the LinearAlgebra spelling, β = 0 NaN-proof
+    fill!(y, NaN32)
+    cv = compile((y, a, x) -> (mul!(y, a, x, 2f0, 0f0); nothing), y, A, x)
+    cv(y, A, x)
+    @test Array(y) ≈ 2 .* (Array(A) * Array(x)) rtol=1e-2 atol=1e-2
+
+    @test_throws DimensionMismatch Stiletto.mul!(y, A, CuArray(rand(Float32, 17)))
+
+    # Base's shapes only; batching is spelled batched_mul!
+    @test_throws MethodError Stiletto.mul!(CuArray(zeros(Float32, 8, 12, 3)),
+        CuArray(rand(Float32, 8, 16, 3)), CuArray(rand(Float32, 16, 12, 3)))
+end
+
 @testset "jit" begin
     fwd(a, b) = max.(a * b, 0f0)
     A, B = CuArray(rand(Float32, 32, 16)), CuArray(rand(Float32, 16, 8))

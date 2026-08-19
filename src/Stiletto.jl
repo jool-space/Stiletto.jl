@@ -28,7 +28,9 @@ using cuDNN: cuDNN, Graph, Tensor, tensor!, scalar!, output!, matmul!, pointwise
     CUDNN_DATA_BOOLEAN
 
 export compile, jit, @compile, @jit, TracedArray
-public rmsnorm, rmsnorm!, layernorm, layernorm!, batchnorm, batchnorm!, attention, attention!, conv, conv!, maxpool, maxpool!, meanpool, meanpool!, batched_mul, batched_mul!, ⊠
+public rmsnorm, rmsnorm!, layernorm, layernorm!, batchnorm, batchnorm!
+public attention, attention!, conv, conv!, maxpool, maxpool!, meanpool, meanpool!
+public mul!, batched_mul, batched_mul!, ⊠
 
 # Language surface: what traced programs are written in
 include("language/types.jl")
@@ -42,6 +44,7 @@ include("compiler/execute.jl")
 include("compiler/cache.jl")
 
 # Operator library: named ops built on the tracer, in dispatch tiers
+include("library/mul.jl")
 include("library/batched_mul.jl")
 include("library/norms.jl")
 include("library/attention.jl")

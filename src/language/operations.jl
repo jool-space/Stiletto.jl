@@ -22,6 +22,7 @@ function matmul(a::TracedArray, b::TracedArray)
     return traced(tr, T, (size(a, 1), size(b, 2), batch...), Matmul(a.id, b.id))
 end
 
+const TracedVector = TracedArray{<:Any,1}
 const TracedMatrix = TracedArray{<:Any,2}
 Base.:*(a::TracedMatrix, b::TracedMatrix) = matmul(a, b)
 Base.:*(a::TracedMatrix, b::AbstractMatrix) = matmul(a, capture(a.trace, b))
@@ -153,12 +154,6 @@ function assign!(dest::TracedArray, v::TracedArray)
     return v
 end
 
-LinearAlgebra.mul!(c::TracedMatrix, a::TracedMatrix, b::TracedMatrix) = assign!(c, matmul(a, b))
-LinearAlgebra.mul!(c::TracedMatrix, a::AbstractMatrix, b::TracedMatrix) =
-    assign!(c, matmul(capture(c.trace, a), b))
-LinearAlgebra.mul!(c::TracedMatrix, a::TracedMatrix, b::AbstractMatrix) =
-    assign!(c, matmul(a, capture(c.trace, b)))
-
 # the 5-arg forms fuse α·A·B + β·C into one graph, the scaling and
 # accumulation a pointwise epilogue on the matmul. β = 0 must not read the
 # destination (Base leaves its contents unspecified there); a β ≠ 0 read is
@@ -170,14 +165,17 @@ function scaled_assign!(c::TracedArray, v::TracedArray, α::Number, β::Number)
     return assign!(c, v)
 end
 
-LinearAlgebra.mul!(c::TracedMatrix, a::TracedMatrix, b::TracedMatrix,
-                   α::Number, β::Number) = scaled_assign!(c, matmul(a, b), α, β)
-LinearAlgebra.mul!(c::TracedMatrix, a::AbstractMatrix, b::TracedMatrix,
-                   α::Number, β::Number) =
-    scaled_assign!(c, matmul(capture(c.trace, a), b), α, β)
-LinearAlgebra.mul!(c::TracedMatrix, a::TracedMatrix, b::AbstractMatrix,
-                   α::Number, β::Number) =
-    scaled_assign!(c, matmul(a, capture(c.trace, b)), α, β)
+# `LinearAlgebra.mul!` on a traced destination is the library verb
+# `Stiletto.mul!`; one method per arity — a traced destination claims any
+# matrix operands, traced or captured
+LinearAlgebra.mul!(c::TracedMatrix, a::AbstractMatrix, b::AbstractMatrix) =
+    mul!(c, a, b)
+LinearAlgebra.mul!(c::TracedMatrix, a::AbstractMatrix, b::AbstractMatrix,
+                   α::Number, β::Number) = mul!(c, a, b, α, β)
+LinearAlgebra.mul!(y::TracedVector, a::AbstractMatrix, x::AbstractVector) =
+    mul!(y, a, x)
+LinearAlgebra.mul!(y::TracedVector, a::AbstractMatrix, x::AbstractVector,
+                   α::Number, β::Number) = mul!(y, a, x, α, β)
 
 # `y .= v` lowers to an identity broadcast; unwrap it so already-computed
 # values (including permuted outputs) assign directly instead of copying

@@ -8,12 +8,13 @@ module Stiletto
 # declared at the maximum rank any operation requires, lifted by trailing
 # singleton dimensions, which is free for column-major storage.
 
-using CUDACore: CuArray
+using CUDACore: CUDACore, CuArray
 using CompilerCaching: CompilerCaching, CacheView
 using LinearAlgebra: LinearAlgebra, Transpose, Adjoint
 using Statistics: Statistics
 using cuDNN: cuDNN, Graph, Tensor, tensor!, scalar!, output!, matmul!, pointwise!,
-    reduction!, norm_fwd!, sdpa_fwd!, conv_fprop!, resample_fwd!, execute!, build!, UnsupportedGraphError,
+    reduction!, norm_fwd!, sdpa_fwd!, sdpa_bwd!, conv_fprop!, resample_fwd!,
+    execute!, build!, UnsupportedGraphError,
     cudnnPointwiseMode_t,
     CUDNN_POINTWISE_ADD, CUDNN_POINTWISE_MUL, CUDNN_POINTWISE_SUB, CUDNN_POINTWISE_DIV,
     CUDNN_POINTWISE_MAX, CUDNN_POINTWISE_MIN, CUDNN_POINTWISE_POW, CUDNN_POINTWISE_ATAN2,
@@ -30,7 +31,8 @@ using cuDNN: cuDNN, Graph, Tensor, tensor!, scalar!, output!, matmul!, pointwise
 
 export compile, jit, @compile, @jit, TracedArray
 public rmsnorm, rmsnorm!, layernorm, layernorm!, batchnorm, batchnorm!
-public attention, attention!, conv, conv!, maxpool, maxpool!, meanpool, meanpool!
+public attention, attention!, attention_backward, attention_backward!
+public conv, conv!, maxpool, maxpool!, meanpool, meanpool!
 public mul!, batched_mul, batched_mul!, ⊠, quantize!
 public graph, bindings
 

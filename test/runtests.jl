@@ -500,6 +500,85 @@ end
                                            Q, CuArray(randn(Float16, d, h, 16, b)), V)
 end
 
+# analytic gradients + softmax LSE for ref_attention's layout; GQA folds
+# grouped q-head gradients onto the shared k/v heads
+function ref_attention_backward(dO, q, k, v; scale, causal=false)
+    d, h, sq, b = size(q)
+    skv, hk = size(k, 3), size(k, 2)
+    q32, k32, v32, dO32 = Float32.(q), Float32.(k), Float32.(v), Float32.(dO)
+    dQ = zeros(Float32, d, h, sq, b)
+    dK = zeros(Float32, d, hk, skv, b)
+    dV = zeros(Float32, d, hk, skv, b)
+    ST = zeros(Float32, 1, sq, h, b)
+    for bi in 1:b, hi in 1:h
+        hkv = fld1(hi, h ÷ hk)
+        Qm, dOm = q32[:, hi, :, bi], dO32[:, hi, :, bi]
+        Km, Vm = k32[:, hkv, :, bi], v32[:, hkv, :, bi]
+        S = scale .* (Km' * Qm)
+        causal && (S .= [j <= i ? S[j, i] : -Inf32 for j in 1:skv, i in 1:sq])
+        m = maximum(S; dims=1)
+        P = exp.(S .- m)
+        z = sum(P; dims=1)
+        ST[1, :, hi, bi] = vec(m) .+ log.(vec(z))
+        Pn = P ./ z
+        dPn = Vm' * dOm
+        dS = Pn .* (dPn .- sum(Pn .* dPn; dims=1)) .* scale
+        dQ[:, hi, :, bi] = Km * dS
+        dK[:, hkv, :, bi] += Qm * dS'
+        dV[:, hkv, :, bi] += dOm * Pn'
+    end
+    return dQ, dK, dV, ST
+end
+
+@testset "attention backward" begin
+    d, h, s, b = 64, 4, 32, 2
+    qh, kh, vh, doh = (randn(Float16, d, h, s, b) for _ in 1:4)
+    Q, K, V, dO = CuArray.((qh, kh, vh, doh))
+    scale = inv(sqrt(Float32(d)))
+
+    # forward with stats: the softmax LSE the backward consumes
+    o, st = Stiletto.attention(Q, K, V; stats=true)
+    @test eltype(o) == Float16
+    @test size(st) == (1, s, h, b)
+    dQr, dKr, dVr, STr = ref_attention_backward(doh, qh, kh, vh; scale)
+    @test Float32.(Array(o)) ≈ ref_attention(qh, kh, vh; scale) rtol=2e-2 atol=2e-2
+    @test Array(st) ≈ STr rtol=1e-2 atol=1e-2
+
+    # eager backward, dense
+    dQ, dK, dV = Stiletto.attention_backward(dO, Q, K, V, o, st)
+    @test Float32.(Array(dQ)) ≈ dQr rtol=3e-2 atol=3e-2
+    @test Float32.(Array(dK)) ≈ dKr rtol=3e-2 atol=3e-2
+    @test Float32.(Array(dV)) ≈ dVr rtol=3e-2 atol=3e-2
+
+    # traced mutating tier, causal, through compile
+    oc, stc = Stiletto.attention(Q, K, V; stats=true, causal=true)
+    dQc, dKc, dVc = (CuArray(zeros(Float16, d, h, s, b)) for _ in 1:3)
+    cb = compile((dq, dk, dv, dO, q, k, v, o, st) ->
+                     (Stiletto.attention_backward!(dq, dk, dv, dO, q, k, v, o, st;
+                                                   causal=true); nothing),
+                 dQc, dKc, dVc, dO, Q, K, V, oc, stc)
+    cb(dQc, dKc, dVc, dO, Q, K, V, oc, stc)
+    dQr, dKr, dVr, _ = ref_attention_backward(doh, qh, kh, vh; scale, causal=true)
+    @test Float32.(Array(dQc)) ≈ dQr rtol=3e-2 atol=3e-2
+    @test Float32.(Array(dKc)) ≈ dKr rtol=3e-2 atol=3e-2
+    @test Float32.(Array(dVc)) ≈ dVr rtol=3e-2 atol=3e-2
+
+    # grouped-query gradients fold onto the shared k/v heads via fullhead
+    # workspaces
+    kg, vg = randn(Float16, d, 2, s, b), randn(Float16, d, 2, s, b)
+    Kg, Vg = CuArray(kg), CuArray(vg)
+    og, stg = Stiletto.attention(Q, Kg, Vg; stats=true)
+    dQg, dKg, dVg = Stiletto.attention_backward(dO, Q, Kg, Vg, og, stg)
+    dQr, dKr, dVr, _ = ref_attention_backward(doh, qh, kg, vg; scale)
+    @test Float32.(Array(dQg)) ≈ dQr rtol=3e-2 atol=3e-2
+    @test Float32.(Array(dKg)) ≈ dKr rtol=3e-2 atol=3e-2
+    @test Float32.(Array(dVg)) ≈ dVr rtol=3e-2 atol=3e-2
+
+    # the composite owns its graph: operands cannot feed other ops
+    @test_throws ArgumentError compile((dO, q, k, v, o, st) ->
+        (Stiletto.attention_backward(dO, q .+ 1f0, k, v, o, st)), dO, Q, K, V, o, st)
+end
+
 @testset "convolution" begin
     xh, wh = randn(Float32, 16, 14, 3, 2), randn(Float32, 3, 3, 3, 8)
     x, w = CuArray(xh), CuArray(wh)

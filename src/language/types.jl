@@ -67,7 +67,20 @@ struct Sdpa                 # scaled dot-product attention (unified SDPA op)
     v::Int
     scale::Int              # Constant node, bound by value at execution
     causal::Bool            # trace-time: bakes a mask subgraph into the graph
+    stats::Bool             # also produce the softmax LSE (an Aux projection)
     seq_len_q::Union{Nothing,Int}   # (1,1,1,b) Int32 inputs: per-batch padding mask
+    seq_len_kv::Union{Nothing,Int}
+end
+struct SdpaBwd              # attention gradients (cuDNN's composite sdpa_bwd!)
+    dO::Int
+    q::Int
+    k::Int
+    v::Int
+    o::Int
+    stats::Int              # the forward's softmax LSE, (1, s, h, b)
+    scale::Int              # Constant node, bound by value at execution
+    causal::Bool
+    seq_len_q::Union{Nothing,Int}
     seq_len_kv::Union{Nothing,Int}
 end
 struct Conv                 # cross-correlation; groups inferred from channels
@@ -107,6 +120,10 @@ noderefs(n::Cast) = (n.x,)
 noderefs(n::Aux) = (n.src,)
 noderefs(n::Sdpa) =
     Tuple(id for id in (n.q, n.k, n.v, n.scale, n.seq_len_q, n.seq_len_kv)
+          if id !== nothing)
+noderefs(n::SdpaBwd) =
+    Tuple(id for id in (n.dO, n.q, n.k, n.v, n.o, n.stats, n.scale,
+                        n.seq_len_q, n.seq_len_kv)
           if id !== nothing)
 noderefs(n::Conv) = (n.x, n.w)
 noderefs(n::Resample) = (n.x,)

@@ -11,10 +11,23 @@
 # Normalization happens over the dimensions `scale` spans: a rank-1 scale of
 # length size(x, 1) normalizes over the first dimension.
 
+"""
+    Stiletto.rmsnorm(x, scale; bias=nothing, epsilon=1f-5)
+    Stiletto.layernorm(x, scale, bias; epsilon=1f-5)
+    Stiletto.rmsnorm!(y, x, scale; ...) / layernorm!(y, x, scale, bias; ...)
+
+RMS and layer normalization over the dimensions `scale` spans: a rank-1
+scale of length `size(x, 1)` normalizes over the first dimension. `scale`
+and `bias` must be inputs of the trace (arguments or captures), not
+computed values — precompute them before compiling. `epsilon` is a
+trace-time constant.
+"""
 rmsnorm(x::TracedArray, scale; bias=nothing, epsilon::Real=1f-5) =
     norm_traced(:rmsnorm, x, scale, bias, epsilon)
 layernorm(x::TracedArray, scale, bias; epsilon::Real=1f-5) =
     norm_traced(:layernorm, x, scale, bias, epsilon)
+@doc (@doc rmsnorm) layernorm
+
 rmsnorm!(y::TracedArray, x::TracedArray, scale; bias=nothing, epsilon::Real=1f-5) =
     assign!(y, rmsnorm(x, scale; bias, epsilon))
 layernorm!(y::TracedArray, x::TracedArray, scale, bias; epsilon::Real=1f-5) =

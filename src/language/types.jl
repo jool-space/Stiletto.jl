@@ -133,9 +133,15 @@ noderefs(n::Permuted) = (n.src,)
 noderefs(n::Sliced) = (n.src,)
 noderefs(n) = ()
 
-# Subtyping AbstractArray admits TracedArrays into generic ::AbstractArray
-# code; interface promises a symbolic value cannot keep (element access,
-# allocation) throw informative errors instead.
+"""
+    TracedArray{T,N}
+
+The symbolic stand-in [`compile`](@ref) and [`jit`](@ref) run the traced
+function on: shape and element type are real, values are not. Subtyping
+`AbstractArray` admits it into generic array code; interface promises a
+symbolic value cannot keep (element access, allocation) throw informative
+errors instead of tracing incorrectly.
+"""
 struct TracedArray{T,N} <: AbstractArray{T,N}
     trace::Trace
     id::Int

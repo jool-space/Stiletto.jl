@@ -1034,6 +1034,8 @@ end
     c = compile((a, b) -> max.(a * b, 0f0), A, B)
     g = Stiletto.graph(c)
     @test g isa cuDNN.Graph
+    @test Stiletto.workspace(c) isa Int   # what the selected plan demands
+    @test Stiletto.workspace(c) >= 0
     binds, outs = Stiletto.bindings(c, A, B)
     @test length(outs) == 1
     cuDNN.execute!(g, binds)

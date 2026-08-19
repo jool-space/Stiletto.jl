@@ -10,13 +10,16 @@ Traces plain Julia array code into fused [cuDNN graphs](https://docs.nvidia.com/
 ```julia
 using Stiletto, CUDA
 
-M, N, K = 64, 32, 48
+M, N, K = 640, 320, 480
 A = CUDA.randn(Float32, K, M)
 B = CUDA.randn(Float32, K, N)
 
 function matmul_epilogue(a::AbstractMatrix, b::AbstractMatrix)
-    tanh.(transpose(a) * b / √K)
+    sum(tanh.(transpose(a) * b / √K), dims=1)
 end
 
-C = @jit matmul_epilogue(A, B)   # 64×32 CuArray
+C = @jit matmul_epilogue(A, B)   # 1×32 CuArray
 ```
+
+Stiletto will try to run any graph supported by cuDNN, but not all graphs will run
+due limitations of cuDNN fusion and engine selection.

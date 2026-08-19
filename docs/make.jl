@@ -7,6 +7,7 @@ makedocs(;
     modules=[Stiletto],
     authors="AntonOresten <antonoresten@proton.me> and contributors",
     sitename="Stiletto.jl",
+    checkdocs=:exports,
     format=Documenter.HTML(;
         canonical="https://docs.jool.space/Stiletto.jl",
         edit_link="main",

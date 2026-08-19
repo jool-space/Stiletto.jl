@@ -34,7 +34,7 @@ public rmsnorm, rmsnorm!, layernorm, layernorm!, batchnorm, batchnorm!
 public attention, attention!, attention_backward, attention_backward!
 public conv, conv!, maxpool, maxpool!, meanpool, meanpool!
 public mul!, batched_mul, batched_mul!, ⊠, quantize!
-public graph, bindings
+public graph, bindings, workspace
 
 # Language surface: what traced programs are written in
 include("language/types.jl")

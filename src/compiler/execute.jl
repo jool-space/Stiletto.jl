@@ -45,6 +45,15 @@ execution themselves: `execute!(Stiletto.graph(c), b)` with `b` from
 graph(c::Compiled) = c.graph
 
 """
+    Stiletto.workspace(c) -> Int
+
+Bytes of scratch workspace the compiled graph's selected execution plan
+demands per call. `compile`'s `max_workspace` caps this at plan selection;
+querying it tells you what the chosen engine actually asked for.
+"""
+workspace(c::Compiled) = Int(c.graph.workspace_size)
+
+"""
     Stiletto.bindings(c, args...) -> (bindings, outputs)
 
 Prepare the tensor bindings a call of `c` with `args` would execute with:

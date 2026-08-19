@@ -790,6 +790,18 @@ end
         @test Array(Y) ≈ before .+ Array(X) rtol=1e-5
     end
 
+    # Base's mutating idiom: returning the destination argument hands back
+    # the caller's buffer, resolved to the value written into it
+    C8 = CuArray(zeros(Float32, 32, 24))
+    c8 = compile((c, a, b) -> (mul!(c, a, b); c), C8, A, B)
+    @test c8(C8, A, B) === C8
+    @test Array(C8) ≈ Array(A) * Array(B) rtol=1e-2 atol=1e-2
+    c9 = compile((y, x) -> (y .= max.(x, 0f0); y), Y, X)
+    @test c9(Y, X) === Y
+    @test Array(Y) ≈ max.(Array(X), 0f0)
+    # returning an input nothing was written to stays refused
+    @test_throws ArgumentError compile((c, a, b) -> (mul!(c, a, b); a), C8, A, B)
+
     # graph execution is dataflow: reading a buffer after writing it is refused
     @test_throws ArgumentError compile((y, x) -> (y .= x .* 2f0; y .* x), Y, X)
     # destinations must be trace inputs
@@ -933,6 +945,34 @@ end
     nr = length(cuDNN.handle().plans)
     Base.invokelatest(jit, stale_outer, X)
     @test length(cuDNN.handle().plans) == nr
+end
+
+@testset "graph and bindings accessors" begin
+    # Stiletto.graph + Stiletto.bindings split c(args...) into its halves:
+    # binding preparation (the argument→tensor mapping the trace declared)
+    # and execution, so callers can schedule execute! themselves
+    A, B = CuArray(rand(Float32, 32, 16)), CuArray(rand(Float32, 16, 8))
+    c = compile((a, b) -> max.(a * b, 0f0), A, B)
+    g = Stiletto.graph(c)
+    @test g isa cuDNN.Graph
+    binds, outs = Stiletto.bindings(c, A, B)
+    @test length(outs) == 1
+    cuDNN.execute!(g, binds)
+    @test Array(outs[1]) ≈ max.(Array(A) * Array(B), 0f0) rtol=1e-2 atol=1e-2
+
+    # rebinding: fresh arguments, same graph
+    A2 = CuArray(rand(Float32, 32, 16))
+    binds2, outs2 = Stiletto.bindings(c, A2, B)
+    cuDNN.execute!(g, binds2)
+    @test Array(outs2[1]) ≈ max.(Array(A2) * Array(B), 0f0) rtol=1e-2 atol=1e-2
+
+    # in-place destinations appear in the outputs, backed by the caller buffer
+    C = CuArray(zeros(Float32, 32, 8))
+    cm = compile((c, a, b) -> mul!(c, a, b), C, A, B)
+    bm, om = Stiletto.bindings(cm, C, A, B)
+    @test om[1] === C
+    cuDNN.execute!(Stiletto.graph(cm), bm)
+    @test Array(C) ≈ Array(A) * Array(B) rtol=1e-2 atol=1e-2
 end
 
 @testset "macros" begin

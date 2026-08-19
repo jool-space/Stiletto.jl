@@ -85,10 +85,21 @@ function compile(f, args...; io_dtype=nothing, intermediate_dtype=Float32,
     for id in keys(tr.destinations)   # writes execute even when not returned
         tf(id)
     end
+    # Base's mutating idiom may return the destination argument itself
+    # (`(mul!(c, a, b); c)`, `y .= ...; y`); resolve it to the value written
+    # into it. Returning an input nothing was written to stays an error.
+    function outid(o)
+        tr.nodes[o.id] isa Union{Leaf,Captured} || return o.id
+        vid = findfirst(==(o.id), tr.destinations)
+        vid === nothing && throw(ArgumentError(
+            "traced function must return computed values, not inputs"))
+        return vid
+    end
+    outids = Int[outid(o) for o in outputs]
     seen = Set{Tensor}()   # mutable struct: hashed by identity
-    for o in outputs
-        t = tf(o.id)
-        haskey(tr.destinations, o.id) && continue  # already a bound output
+    for id in outids
+        t = tf(id)
+        haskey(tr.destinations, id) && continue  # already a bound output
         t in seen && throw(ArgumentError(
             "the same computed value cannot be returned twice, permuted or not"))
         push!(seen, t)
@@ -105,14 +116,14 @@ function compile(f, args...; io_dtype=nothing, intermediate_dtype=Float32,
     # distinction is gone. Either way allocation matches the declaration;
     # the trace knows the Julia type, so no reverse dtype-enum mapping is
     # needed — that map is not extensible.
-    eltypes = map(outputs) do o
-        t = tensors[o.id]
-        t.dtype === nothing || return eltype(o)              # cast
+    function output_eltype(o, id)
+        t = tensors[id]
+        t.dtype === nothing || return eltype(o)              # cast (or bound dest)
         io_dtype === nothing || return io_dtype              # explicit policy
         t.dtype = cuDNN.cudnnDataType(eltype(o))             # Base promotion
         return eltype(o)
     end
-    eltypes = DataType[eltypes...]
+    eltypes = DataType[output_eltype(o, id) for (o, id) in zip(outputs, outids)]
     # cuDNN's select_plan owns the heuristic-mode default; forward it only
     # when the caller overrides
     build_kwargs = (; deterministic, max_workspace)
@@ -124,7 +135,7 @@ function compile(f, args...; io_dtype=nothing, intermediate_dtype=Float32,
     for (i, node) in enumerate(tr.nodes)
         node isa Leaf && (tr.nodes[i] = Leaf(node.argindex, nothing))
     end
-    return Compiled(g, tr, tensors, length(args), [o.id for o in outputs],
+    return Compiled(g, tr, tensors, length(args), outids,
                     [collect(Int, o.dims) for o in outputs], eltypes, tf.extra,
                     allocator)
 end

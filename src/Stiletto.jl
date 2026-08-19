@@ -32,6 +32,7 @@ export compile, jit, @compile, @jit, TracedArray
 public rmsnorm, rmsnorm!, layernorm, layernorm!, batchnorm, batchnorm!
 public attention, attention!, conv, conv!, maxpool, maxpool!, meanpool, meanpool!
 public mul!, batched_mul, batched_mul!, ⊠, quantize!
+public graph, bindings
 
 # Language surface: what traced programs are written in
 include("language/types.jl")

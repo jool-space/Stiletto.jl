@@ -14,4 +14,5 @@ cuDNN = "02a925ec-e4fe-4b08-9a7e-0d78e3d38ccd"
 [compat]
 BFloat16s = "0.6.1"
 BitPacking = "0.2.5"
+NNlib = "0.9.44"
 SpecialFunctions = "2.8.3"

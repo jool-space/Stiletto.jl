@@ -148,6 +148,31 @@ end
     @test Array(c(A, B)) ≈ max.(Array(A) * Array(B) .- 1f0, 0f0) rtol=1e-2 atol=1e-2
 end
 
+@testset "half io" begin
+    # by default outputs keep Julia's promotion: a pure-half chain returns
+    # half, and a Float32 scalar promotes the result exactly as Base would
+    A16 = CuArray(rand(Float16, 32, 16) ./ 4)
+    B16 = CuArray(rand(Float16, 16, 24) ./ 4)
+    ref = Float32.(Array(A16)) * Float32.(Array(B16))
+
+    cb = compile((a, b) -> a * b, A16, B16)
+    yb = cb(A16, B16)
+    @test eltype(yb) == Float16
+    @test Array(yb) ≈ ref rtol=1e-2 atol=1e-2
+
+    cp = compile((a, b) -> tanh.(a * b .- 1f0), A16, B16)
+    yp = cp(A16, B16)
+    @test eltype(yp) == Float32
+    @test Array(yp) ≈ tanh.(ref .- 1f0) rtol=1e-2 atol=1e-2
+
+    # explicit io_dtype is a precision policy: non-cast outputs follow it,
+    # scalar promotion notwithstanding
+    c = compile((a, b) -> tanh.(a * b .- 1f0), A16, B16; io_dtype=Float16)
+    y = c(A16, B16)
+    @test eltype(y) == Float16
+    @test Array(y) ≈ tanh.(ref .- 1f0) rtol=1e-2 atol=1e-2
+end
+
 @testset "pointwise chain" begin
     X = CuArray(rand(Float32, 32, 32))
     c = compile(x -> exp.(.-(2f0 .* x)), X)
@@ -886,6 +911,28 @@ end
         CUDACore.synchronize()
         @test Array(Y) ≈ Array(W1) * Array(X) rtol=1e-2 atol=1e-2
     end
+end
+
+@testset "jit invalidation" begin
+    # the cache keys on the CodeInstance of the traced call, so redefining
+    # the function — or anything it calls — retraces instead of replaying
+    # the stale graph. invokelatest because testset bodies freeze world age.
+    X = CuArray(rand(Float32, 8, 8))
+    @eval stale_f(x) = x .+ 1f0
+    @test Array(Base.invokelatest(jit, stale_f, X)) ≈ Array(X) .+ 1 rtol=1e-5
+    @eval stale_f(x) = x .+ 2f0
+    @test Array(Base.invokelatest(jit, stale_f, X)) ≈ Array(X) .+ 2 rtol=1e-5
+
+    @eval stale_inner(x) = x .+ 1f0
+    @eval stale_outer(x) = stale_inner(x) .* 2f0
+    @test Array(Base.invokelatest(jit, stale_outer, X)) ≈ (Array(X) .+ 1) .* 2 rtol=1e-5
+    @eval stale_inner(x) = x .+ 3f0
+    @test Array(Base.invokelatest(jit, stale_outer, X)) ≈ (Array(X) .+ 3) .* 2 rtol=1e-5
+
+    # an unchanged world replays the cached plan
+    nr = length(cuDNN.handle().plans)
+    Base.invokelatest(jit, stale_outer, X)
+    @test length(cuDNN.handle().plans) == nr
 end
 
 @testset "macros" begin

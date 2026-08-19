@@ -9,8 +9,10 @@ using Microscaling: BlockscaledArray, F8_4x128Array, f8_4x128, elements, scales,
     Float8_E4M3FN, Float8_E5M2, Float8_E8M0FNU, Float4_E2M1FN
 using BitPacking: NarrowArray
 using cuDNN: Graph, tensor!, scalar!, output!, matmul!, pointwise!, reduction!,
-    block_scale_dequantize!, execute!, is_supported,
-    CUDNN_TENSOR_REORDERING_F8_128x4
+    block_scale_dequantize!, build!, execute!, is_supported,
+    CUDNN_TENSOR_REORDERING_F8_128x4, CUDNN_DATA_INT32, CUDNN_DATA_BOOLEAN,
+    CUDNN_POINTWISE_GEN_INDEX, CUDNN_POINTWISE_CMP_GE,
+    CUDNN_POINTWISE_BINARY_SELECT, CUDNN_REDUCE_TENSOR_AMAX
 
 # test-owned reference: expand each scale over its block of elements
 dequant_ref(e, s, block) =
@@ -264,87 +266,133 @@ end
 end
 
 @testset "MXFP8 attention (composed fMHA)" begin
-    # cudnn-frontend's MXFP8 SDPA recipe, mirrored op for op from its node
-    # expansion: block-scale-dequantize Q/K/V before the BMMs, composed
-    # softmax, P quantized at fixed scale 256 by typing the pointwise output
-    # E4M3 (cast-by-dtype), no post-descale. NVIDIA gates the recipe to
-    # cuDNN ≥ 9.21 on Blackwell Data Center (CC 10.x) — GB10 (CC 12.x) is
-    # excluded — so support is CLAIMED there and the numerics have never run
-    # anywhere yet: the first execution on CC 10 hardware is the arbiter.
+    # cudnn-frontend's MXFP8 SDPA recipe, mirrored op for op from its
+    # CompositeSDPANode expansion and execution-verified on B200 (sm_100,
+    # 9.24, dense + causal): Q and V dequantize from natural BHSD
+    # declarations, K enters pre-transposed (dims/strides swapped, SF_K's
+    # declaration swapped with it), softmax from primitives with LSE stats,
+    # P narrowed to E4M3 by typing the div output (bmm2's aType must be the
+    # io dtype; the MX recipe has no fixed-scale multiply), BF16 O with
+    # fused AMAX. Scale tiles pad semantically — the blocked axis's scale
+    # count to a multiple of 4, its partner axis to 128 — so SF_V, which
+    # blocks the sequence axis, needs cuDNN's generalized tile check.
+    # NVIDIA gates the recipe to cuDNN ≥ 9.21 on CC 10.x; GB10 builds the
+    # graphs but has no engine.
     Scale, Element, blk = Float8_E8M0FNU, Float8_E4M3FN, 32
-    d, hh, s, b = 128, 4, 256, 2      # tile-exact: d/32 = 4, s multiple of 128
+    d, hh, s, b = 128, 4, 256, 2
     ds, dsh = d * s, d * s * hh
-    sc = d ÷ blk
+    dsp = cld(cld(d, blk), 4) * 4     # Q/K d-blocks padded to 4
+    sp = cld(s, 128) * 128            # Q/K partner rows padded to 128
+    svp = cld(cld(s, blk), 4) * 4     # V s-blocks padded to 4
+    dp = cld(d, 128) * 128            # V partner axis padded to 128
+    attn_scale = inv(sqrt(Float32(d)))
 
-    # V's column-wise scales need the generalized check_swizzled_scale_dims
-    # (branch cudnn-blockscale-check); broken until the resolved cuDNN has it
-    built = try
-    g = Graph(io_dtype=Float16, intermediate_dtype=Float32, compute_dtype=Float32)
-    # BHSD storage (d, s, h, b); Q and V presented (s, d, h, b), K natural
-    qe = tensor!(g; dims=(s, d, hh, b), strides=(d, 1, ds, dsh), dtype=Element, name="Q")
-    qs = tensor!(g; dims=(s, sc, hh, b), strides=(sc, 1, sc * s, sc * s * hh),
-                 dtype=Scale, name="Q.scale", reordering=CUDNN_TENSOR_REORDERING_F8_128x4)
-    ke = tensor!(g; dims=(d, s, hh, b), strides=(1, d, ds, dsh), dtype=Element, name="K")
-    ks = tensor!(g; dims=(sc, s, hh, b), strides=(1, sc, sc * s, sc * s * hh),
-                 dtype=Scale, name="K.scale", reordering=CUDNN_TENSOR_REORDERING_F8_128x4)
-    ve = tensor!(g; dims=(s, d, hh, b), strides=(d, 1, ds, dsh), dtype=Element, name="V")
-    # V blocks the sequence dim; tile roles are positional (fastest dim pads
-    # to 4, second-fastest to 128), so the s÷32 = 8 scale rows pad to 128
-    vs = tensor!(g; dims=(128, d, hh, b), strides=(d, 1, d * 128, d * 128 * hh),
-                 dtype=Scale, name="V.scale", reordering=CUDNN_TENSOR_REORDERING_F8_128x4)
+    function build_fwd(causal)
+        g = Graph(intermediate_dtype=Float32, compute_dtype=Float32)
+        q = tensor!(g; dims=(d, s, hh, b), dtype=Element, name="Q")
+        sfq = tensor!(g; dims=(dsp, sp, hh, b), dtype=Scale, name="SF_Q",
+                      reordering=CUDNN_TENSOR_REORDERING_F8_128x4)
+        dq = block_scale_dequantize!(g, q, sfq; block_size=blk, name="Qdq")
+        kt = tensor!(g; dims=(s, d, hh, b), strides=(d, 1, ds, dsh),
+                     dtype=Element, name="KT")
+        sfk = tensor!(g; dims=(sp, dsp, hh, b),
+                      strides=(dsp, 1, dsp * sp, dsp * sp * hh),
+                      dtype=Scale, name="SF_K",
+                      reordering=CUDNN_TENSOR_REORDERING_F8_128x4)
+        dk = block_scale_dequantize!(g, kt, sfk; block_size=blk, name="Kdq")
+        v = tensor!(g; dims=(d, s, hh, b), dtype=Element, name="V")
+        sfv = tensor!(g; dims=(dp, svp, hh, b), dtype=Scale, name="SF_V",
+                      reordering=CUDNN_TENSOR_REORDERING_F8_128x4)
+        dv = block_scale_dequantize!(g, v, sfv; block_size=blk, name="Vdq")
 
-    qd = block_scale_dequantize!(g, qe, qs; block_size=blk, name="Qd")
-    kd = block_scale_dequantize!(g, ke, ks; block_size=blk, name="Kd")
-    vd = block_scale_dequantize!(g, ve, vs; block_size=blk, name="Vd")
-    S = matmul!(g, qd, kd; name="bmm1")
-    attn_scale = scalar!(g, Float32; rank=4, name="AttnScale")
-    Ss = pointwise!(g, :mul, S, attn_scale; name="scaled")
-    m = reduction!(g, :max, Ss; dims=2, name="rowmax")
-    e = pointwise!(g, :exp, pointwise!(g, :sub, Ss, m; name="centered"); name="expS")
-    z = reduction!(g, :add, e; dims=2, name="rowsum")
-    P = pointwise!(g, :div, e, z; name="softmax")
-    scale_s = scalar!(g, Float32; rank=4, name="ScaleS")
-    Pq = tensor!(g; dims=P.dims, dtype=Element, virtual=true, name="Pq")
-    pointwise!(g, :mul, P, scale_s; y=Pq)
-    O = tensor!(g; dims=(s, d, hh, b), dtype=Float16, output=true, name="O")
-    matmul!(g, Pq, vd; c=O)
-    (; g, qe, qs, ke, ks, ve, vs, attn_scale, scale_s, O)
-    catch err
-        err isa DimensionMismatch || rethrow()
-        nothing
+        S = matmul!(g, dk, dq; c=tensor!(g; dims=(s, s, hh, b), dtype=nothing,
+                                         virtual=true, name="S"))
+        scale = scalar!(g, Float32; rank=4, name="AttnScale")
+        ss = pointwise!(g, :mul, S, scale; name="mul_attn_scale")
+        ninf = nothing
+        if causal
+            ninf = scalar!(g, Float32; rank=4, name="MaskValue")
+            row = tensor!(g; dims=(s, s, hh, b), dtype=CUDNN_DATA_INT32,
+                          virtual=true, name="row_idx")
+            col = tensor!(g; dims=(s, s, hh, b), dtype=CUDNN_DATA_INT32,
+                          virtual=true, name="col_idx")
+            pointwise!(g, CUDNN_POINTWISE_GEN_INDEX, ss; y=row, axis=2,
+                       compute_dtype=CUDNN_DATA_INT32, name="gen_row_idx")
+            pointwise!(g, CUDNN_POINTWISE_GEN_INDEX, ss; y=col, axis=3,
+                       compute_dtype=CUDNN_DATA_INT32, name="gen_col_idx")
+            mask = tensor!(g; dims=(s, s, hh, b), dtype=CUDNN_DATA_BOOLEAN,
+                           virtual=true, name="causal_mask")
+            pointwise!(g, CUDNN_POINTWISE_CMP_GE, row, col; y=mask,
+                       compute_dtype=CUDNN_DATA_INT32, name="row_ge_col")
+            ss = pointwise!(g, CUDNN_POINTWISE_BINARY_SELECT, ss, ninf, mask,
+                            name="select_causal")
+        end
+        m = reduction!(g, :max, ss; dims=1, name="row_max")
+        ex = pointwise!(g, :exp, pointwise!(g, :sub, ss, m; name="sub_s_max");
+                        name="exp_s")
+        z = reduction!(g, :add, ex; dims=1, name="row_sum")
+        p8 = tensor!(g; dims=(s, s, hh, b), dtype=Element, virtual=true,
+                     name="P8")
+        pointwise!(g, :div, ex, z; y=p8, name="div_p")
+        stats = tensor!(g; dims=(1, s, hh, b), dtype=Float32, output=true,
+                        name="Stats")
+        pointwise!(g, :add, m, pointwise!(g, :log, z; name="log_sum");
+                   y=stats, name="add_stats")
+        o = tensor!(g; dims=(d, s, hh, b), dtype=BFloat16, output=true,
+                    name="O")
+        matmul!(g, dv, p8; c=o)
+        amax = tensor!(g; dims=(1, 1, 1, 1), dtype=Float32, output=true,
+                       name="AmaxO")
+        reduction!(g, CUDNN_REDUCE_TENSOR_AMAX, o; y=amax, dims=(1, 2, 3, 4),
+                   name="amax_o")
+        return (; g, q, sfq, kt, sfk, v, sfv, scale, ninf, stats, o, amax)
     end
 
     cc = CUDACore.capability(CUDACore.device())
     mxfp8_sdpa_claimed = cc.major == 10 && cuDNN.version() >= v"9.21"
-    if built === nothing
-        @test_broken false
-    else
-    (; g, qe, qs, ke, ks, ve, vs, attn_scale, scale_s, O) = built
-    if !is_supported(g)
-        @test !mxfp8_sdpa_claimed   # vendor-documented on CC 10: fail loudly there
-        @test_skip mxfp8_sdpa_claimed
-    else
-        qeh, keh, veh = (Element.(randn(Float32, d, s, hh, b)) for _ in 1:3)
-        qsh, ksh = (Scale.(rand(Float32, sc, s, hh, b) / √d) for _ in 1:2)
-        vsh = Scale.(rand(Float32, d, s ÷ blk, hh, b) / √d)  # natural (4-axis, 128-axis)
-        Oa = CuArray(zeros(Float16, s, d, hh, b))
-        execute!(g, qe => CuArray(qeh), qs => f8_4x128(CuArray(qsh)),
-                    ke => CuArray(keh), ks => f8_4x128(CuArray(ksh)),
-                    ve => CuArray(veh), vs => f8_4x128(CuArray(vsh)),  # s-blocks auto-pad to a whole tile
-                    attn_scale => inv(sqrt(Float32(d))), scale_s => 256f0, O => Oa)
-        # reference with the fixed-256 fp8 P model
-        dq4(el, sf, bdim) = Float32.(el) .*
-            repeat(Float32.(sf); inner=ntuple(i -> i == bdim ? blk : 1, 4))
-        Qd = dq4(qeh, qsh, 1)
-        Kd = dq4(keh, ksh, 1)
-        Vd = dq4(veh, vsh, 2)
-        for bi in 1:b, hi in 1:hh
-            Sm = inv(sqrt(Float32(d))) .* (Qd[:, :, hi, bi]' * Kd[:, :, hi, bi])
-            Pm = mapslices(r -> (w = exp.(r .- maximum(r)); w ./ sum(w)), Sm; dims=2)
-            Pf = Float32.(Element.(256f0 .* Pm))
-            @test Float32.(Array(@view Oa[:, :, hi, bi])) ≈
-                  Pf * Vd[:, :, hi, bi]' rtol=6e-2 atol=6e-2
+    @testset "causal=$causal" for causal in (false, true)
+        t = build_fwd(causal)   # must construct everywhere (semantic tiles)
+        if !is_supported(t.g)
+            @test !mxfp8_sdpa_claimed   # vendor-documented on CC 10: loud
+            continue
         end
-    end
+        @test mxfp8_sdpa_claimed
+        build!(t.g)
+        qeh, keh, veh = (Element.(randn(Float32, d, s, hh, b) / 4) for _ in 1:3)
+        qsh, ksh = (Scale.(exp2.(rand(-2:2, d ÷ blk, s, hh, b))) for _ in 1:2)
+        vsh = Scale.(exp2.(rand(-2:2, d, s ÷ blk, hh, b)))
+        Oa = CuArray(zeros(BFloat16, d, s, hh, b))
+        St = CuArray(zeros(Float32, 1, s, hh, b))
+        Am = CuArray(zeros(Float32, 1, 1, 1, 1))
+        binds = Dict{cuDNN.Tensor,Any}(
+            t.q => CuArray(qeh), t.sfq => f8_4x128(CuArray(qsh)),
+            t.kt => CuArray(keh), t.sfk => f8_4x128(CuArray(ksh)),
+            t.v => CuArray(veh), t.sfv => f8_4x128(CuArray(vsh)),
+            t.scale => attn_scale, t.stats => St, t.o => Oa, t.amax => Am)
+        t.ninf === nothing || (binds[t.ninf] = -Inf32)
+        execute!(t.g, binds)
+
+        # plain-softmax reference with the P quantization emulated; O error
+        # sits in the fp8-P band, stats are computed pre-quantization and
+        # must be tight
+        Oref = zeros(Float32, d, s, hh, b)
+        for bi in 1:b, hi in 1:hh
+            Qm = dequant_ref(qeh[:, :, hi, bi], qsh[:, :, hi, bi], blk)
+            Km = dequant_ref(keh[:, :, hi, bi], ksh[:, :, hi, bi], blk)
+            Vm = Float32.(veh[:, :, hi, bi]) .*
+                 repeat(Float32.(vsh[:, :, hi, bi]); inner=(1, blk))
+            Sm = (Km' * Qm) .* attn_scale                        # (s_kv, s_q)
+            causal && (Sm .= [kk <= qq ? Sm[kk, qq] : -Inf32
+                              for kk in 1:s, qq in 1:s])
+            mx = maximum(Sm; dims=1)
+            P = exp.(Sm .- mx)
+            z = sum(P; dims=1)
+            Pq = Float32.(Element.(P ./ z))
+            Oref[:, :, hi, bi] = Vm * Pq
+            @test Float32.(Array(@view Oa[:, :, hi, bi])) ≈
+                  Oref[:, :, hi, bi] rtol=6e-2 atol=6e-2
+            @test vec(Array(St)[1, :, hi, bi]) ≈ vec(mx .+ log.(z)) atol=2e-3
+        end
+        @test Array(Am)[1] ≈ maximum(abs, Oref) rtol=5e-2
     end
 end

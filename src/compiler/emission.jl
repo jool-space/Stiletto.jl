@@ -62,14 +62,90 @@ emit!(g::Graph, tf, i, node::Norm, R) =
               epsilon=maybe(tf, node.epsilon), name=nodename(i, node))
 
 function emit!(g::Graph, tf, i, node::Sdpa, R)
-    o = sdpa_fwd!(g, tf(node.q), tf(node.k), tf(node.v); o=dest_tensor(tf, i),
+    q = tf(node.q)
+    stats = nothing
+    if node.stats
+        # the (1, s, h, b)-packed buffer the backward requires, declared on
+        # the forward's (1, h, s, b) dims through strides at no cost
+        _, hq, sq, b = Int.(q.dims)
+        stats = tensor!(g; dims=lift_dims((1, hq, sq, b), R),
+                        strides=[Int64[1, sq, 1, sq * hq];
+                                 fill(Int64(sq * hq * b), R - 4)],
+                        dtype=Float32, output=true, name="stats$i")
+    end
+    r = sdpa_fwd!(g, q, tf(node.k), tf(node.v); o=dest_tensor(tf, i), stats,
                   scale=tf(node.scale), causal=node.causal,
                   seq_len_q=maybe(tf, node.seq_len_q),
                   seq_len_kv=maybe(tf, node.seq_len_kv))
     # the causal mask's fill value is a runtime input of the mega-op, not a
     # node of the trace; bind it here
     node.causal && (tf.extra[g.ops[end].mask_subgraph.fill] = -Inf32)
+    node.stats || return r
+    o, st = r
+    tf.aux[(i, :stats)] = st
     return o
+end
+
+# the composite backward owns its graph: operands get backward's (d, s, h, b)
+# declarations presenting the canonical (d, h, s, b) storage — same memory,
+# different dims order — so they cannot also be declared by other uses
+function emit!(g::Graph, tf, i, node::SdpaBwd, R)
+    R == 4 || throw(ArgumentError(
+        "attention_backward requires a rank-4 graph; it cannot share a trace " *
+        "with higher-rank values"))
+    function io_tensor(id, name)
+        tf.tensors[id] === nothing || throw(ArgumentError(
+            "attention_backward operands cannot feed other operations in the same trace"))
+        n = tf.trace.nodes[id]
+        n isa Union{Leaf,Captured} || throw(ArgumentError(
+            "attention_backward operands must be trace inputs, not computed or " *
+            "re-presented values"))
+        ex = input_example(n)
+        d, h, s, b = size(ex)
+        t = tensor!(tf.g; dims=(d, s, h, b), strides=(1, d * h, d, d * h * s),
+                    dtype=eltype(ex), name)
+        tf.tensors[id] = t
+        return t
+    end
+    q = io_tensor(node.q, "Q")
+    k = io_tensor(node.k, "K")
+    v = io_tensor(node.v, "V")
+    o = io_tensor(node.o, "O")
+    dO = io_tensor(node.dO, "dO")
+    stats = tf(node.stats)   # (1, s, h, b) dense: already backward's packing
+
+    ex = input_example(tf.trace.nodes[node.q])
+    T = eltype(ex)
+    d, h, sq, b = size(ex)
+    kex = input_example(tf.trace.nodes[node.k])
+    _, hk, skv, _ = size(kex)
+    out(name, s, nh) = tensor!(g; dims=(d, s, nh, b),
+                               strides=(1, d * nh, d, d * nh * s),
+                               dtype=T, output=true, name)
+    tdq = out("dQ", sq, h)
+    tdk = out("dK", skv, hk)
+    tdv = out("dV", skv, hk)
+
+    _, _, _, softmax_sum, dQ_accum, dKf, dVf =
+        sdpa_bwd!(g, q, k, v, o, dO, stats; dQ=tdq, dK=tdk, dV=tdv,
+                  scale=tf(node.scale), causal=node.causal,
+                  seq_len_q=maybe(tf, node.seq_len_q),
+                  seq_len_kv=maybe(tf, node.seq_len_kv))
+
+    # fp32 spill buffers and grouped-head workspaces the pattern requires:
+    # allocated once at emission, pinned for the plan's lifetime like its
+    # cuDNN workspace; the ×1 scalar fills the pattern's dropout-scale slot
+    tf.extra[softmax_sum] = CUDACore.zeros(Float32, 1, sq, h, b)
+    tf.extra[dQ_accum] = CUDACore.zeros(Float32, d, sq, h, b)
+    dKf === nothing || (tf.extra[dKf] = CUDACore.zeros(T, d, skv, h, b))
+    dVf === nothing || (tf.extra[dVf] = CUDACore.zeros(T, d, skv, h, b))
+    tf.extra[cuDNN.tensor(g, "One")] = 1f0
+    (node.causal || node.seq_len_q !== nothing) &&
+        (tf.extra[cuDNN.tensor(g, "MaskValue")] = -Inf32)
+
+    tf.aux[(i, :dk)] = tdk
+    tf.aux[(i, :dv)] = tdv
+    return tdq
 end
 
 emit!(g::Graph, tf, i, node::Conv, R) =
@@ -82,6 +158,16 @@ emit!(g::Graph, tf, i, node::Resample, R) =
                   window=node.window, pre_padding=node.pre_padding,
                   post_padding=node.post_padding, stride=node.stride,
                   name=nodename(i, node))
+
+# projections force their op (memoized) and fetch the auxiliary tensor the
+# op's emission recorded
+function emit!(g::Graph, tf, i, node::Aux, R)
+    tf(node.src)
+    t = get(tf.aux, (node.src, node.which), nothing)
+    t === nothing && throw(ArgumentError(
+        "node $(node.src) provides no auxiliary result $(node.which)"))
+    return t
+end
 
 function emit!(g::Graph, tf, i, node::Cast, R)
     x = tf(node.x)

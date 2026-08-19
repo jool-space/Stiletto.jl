@@ -148,6 +148,31 @@ end
     @test Array(c(A, B)) ≈ max.(Array(A) * Array(B) .- 1f0, 0f0) rtol=1e-2 atol=1e-2
 end
 
+@testset "half io" begin
+    # by default outputs keep Julia's promotion: a pure-half chain returns
+    # half, and a Float32 scalar promotes the result exactly as Base would
+    A16 = CuArray(rand(Float16, 32, 16) ./ 4)
+    B16 = CuArray(rand(Float16, 16, 24) ./ 4)
+    ref = Float32.(Array(A16)) * Float32.(Array(B16))
+
+    cb = compile((a, b) -> a * b, A16, B16)
+    yb = cb(A16, B16)
+    @test eltype(yb) == Float16
+    @test Array(yb) ≈ ref rtol=1e-2 atol=1e-2
+
+    cp = compile((a, b) -> tanh.(a * b .- 1f0), A16, B16)
+    yp = cp(A16, B16)
+    @test eltype(yp) == Float32
+    @test Array(yp) ≈ tanh.(ref .- 1f0) rtol=1e-2 atol=1e-2
+
+    # explicit io_dtype is a precision policy: non-cast outputs follow it,
+    # scalar promotion notwithstanding
+    c = compile((a, b) -> tanh.(a * b .- 1f0), A16, B16; io_dtype=Float16)
+    y = c(A16, B16)
+    @test eltype(y) == Float16
+    @test Array(y) ≈ tanh.(ref .- 1f0) rtol=1e-2 atol=1e-2
+end
+
 @testset "pointwise chain" begin
     X = CuArray(rand(Float32, 32, 32))
     c = compile(x -> exp.(.-(2f0 .* x)), X)
@@ -475,6 +500,85 @@ end
                                            Q, CuArray(randn(Float16, d, h, 16, b)), V)
 end
 
+# analytic gradients + softmax LSE for ref_attention's layout; GQA folds
+# grouped q-head gradients onto the shared k/v heads
+function ref_attention_backward(dO, q, k, v; scale, causal=false)
+    d, h, sq, b = size(q)
+    skv, hk = size(k, 3), size(k, 2)
+    q32, k32, v32, dO32 = Float32.(q), Float32.(k), Float32.(v), Float32.(dO)
+    dQ = zeros(Float32, d, h, sq, b)
+    dK = zeros(Float32, d, hk, skv, b)
+    dV = zeros(Float32, d, hk, skv, b)
+    ST = zeros(Float32, 1, sq, h, b)
+    for bi in 1:b, hi in 1:h
+        hkv = fld1(hi, h ÷ hk)
+        Qm, dOm = q32[:, hi, :, bi], dO32[:, hi, :, bi]
+        Km, Vm = k32[:, hkv, :, bi], v32[:, hkv, :, bi]
+        S = scale .* (Km' * Qm)
+        causal && (S .= [j <= i ? S[j, i] : -Inf32 for j in 1:skv, i in 1:sq])
+        m = maximum(S; dims=1)
+        P = exp.(S .- m)
+        z = sum(P; dims=1)
+        ST[1, :, hi, bi] = vec(m) .+ log.(vec(z))
+        Pn = P ./ z
+        dPn = Vm' * dOm
+        dS = Pn .* (dPn .- sum(Pn .* dPn; dims=1)) .* scale
+        dQ[:, hi, :, bi] = Km * dS
+        dK[:, hkv, :, bi] += Qm * dS'
+        dV[:, hkv, :, bi] += dOm * Pn'
+    end
+    return dQ, dK, dV, ST
+end
+
+@testset "attention backward" begin
+    d, h, s, b = 64, 4, 32, 2
+    qh, kh, vh, doh = (randn(Float16, d, h, s, b) for _ in 1:4)
+    Q, K, V, dO = CuArray.((qh, kh, vh, doh))
+    scale = inv(sqrt(Float32(d)))
+
+    # forward with stats: the softmax LSE the backward consumes
+    o, st = Stiletto.attention(Q, K, V; stats=true)
+    @test eltype(o) == Float16
+    @test size(st) == (1, s, h, b)
+    dQr, dKr, dVr, STr = ref_attention_backward(doh, qh, kh, vh; scale)
+    @test Float32.(Array(o)) ≈ ref_attention(qh, kh, vh; scale) rtol=2e-2 atol=2e-2
+    @test Array(st) ≈ STr rtol=1e-2 atol=1e-2
+
+    # eager backward, dense
+    dQ, dK, dV = Stiletto.attention_backward(dO, Q, K, V, o, st)
+    @test Float32.(Array(dQ)) ≈ dQr rtol=3e-2 atol=3e-2
+    @test Float32.(Array(dK)) ≈ dKr rtol=3e-2 atol=3e-2
+    @test Float32.(Array(dV)) ≈ dVr rtol=3e-2 atol=3e-2
+
+    # traced mutating tier, causal, through compile
+    oc, stc = Stiletto.attention(Q, K, V; stats=true, causal=true)
+    dQc, dKc, dVc = (CuArray(zeros(Float16, d, h, s, b)) for _ in 1:3)
+    cb = compile((dq, dk, dv, dO, q, k, v, o, st) ->
+                     (Stiletto.attention_backward!(dq, dk, dv, dO, q, k, v, o, st;
+                                                   causal=true); nothing),
+                 dQc, dKc, dVc, dO, Q, K, V, oc, stc)
+    cb(dQc, dKc, dVc, dO, Q, K, V, oc, stc)
+    dQr, dKr, dVr, _ = ref_attention_backward(doh, qh, kh, vh; scale, causal=true)
+    @test Float32.(Array(dQc)) ≈ dQr rtol=3e-2 atol=3e-2
+    @test Float32.(Array(dKc)) ≈ dKr rtol=3e-2 atol=3e-2
+    @test Float32.(Array(dVc)) ≈ dVr rtol=3e-2 atol=3e-2
+
+    # grouped-query gradients fold onto the shared k/v heads via fullhead
+    # workspaces
+    kg, vg = randn(Float16, d, 2, s, b), randn(Float16, d, 2, s, b)
+    Kg, Vg = CuArray(kg), CuArray(vg)
+    og, stg = Stiletto.attention(Q, Kg, Vg; stats=true)
+    dQg, dKg, dVg = Stiletto.attention_backward(dO, Q, Kg, Vg, og, stg)
+    dQr, dKr, dVr, _ = ref_attention_backward(doh, qh, kg, vg; scale)
+    @test Float32.(Array(dQg)) ≈ dQr rtol=3e-2 atol=3e-2
+    @test Float32.(Array(dKg)) ≈ dKr rtol=3e-2 atol=3e-2
+    @test Float32.(Array(dVg)) ≈ dVr rtol=3e-2 atol=3e-2
+
+    # the composite owns its graph: operands cannot feed other ops
+    @test_throws ArgumentError compile((dO, q, k, v, o, st) ->
+        (Stiletto.attention_backward(dO, q .+ 1f0, k, v, o, st)), dO, Q, K, V, o, st)
+end
+
 @testset "convolution" begin
     xh, wh = randn(Float32, 16, 14, 3, 2), randn(Float32, 3, 3, 3, 8)
     x, w = CuArray(xh), CuArray(wh)
@@ -765,6 +869,18 @@ end
         @test Array(Y) ≈ before .+ Array(X) rtol=1e-5
     end
 
+    # Base's mutating idiom: returning the destination argument hands back
+    # the caller's buffer, resolved to the value written into it
+    C8 = CuArray(zeros(Float32, 32, 24))
+    c8 = compile((c, a, b) -> (mul!(c, a, b); c), C8, A, B)
+    @test c8(C8, A, B) === C8
+    @test Array(C8) ≈ Array(A) * Array(B) rtol=1e-2 atol=1e-2
+    c9 = compile((y, x) -> (y .= max.(x, 0f0); y), Y, X)
+    @test c9(Y, X) === Y
+    @test Array(Y) ≈ max.(Array(X), 0f0)
+    # returning an input nothing was written to stays refused
+    @test_throws ArgumentError compile((c, a, b) -> (mul!(c, a, b); a), C8, A, B)
+
     # graph execution is dataflow: reading a buffer after writing it is refused
     @test_throws ArgumentError compile((y, x) -> (y .= x .* 2f0; y .* x), Y, X)
     # destinations must be trace inputs
@@ -888,6 +1004,56 @@ end
     end
 end
 
+@testset "jit invalidation" begin
+    # the cache keys on the CodeInstance of the traced call, so redefining
+    # the function — or anything it calls — retraces instead of replaying
+    # the stale graph. invokelatest because testset bodies freeze world age.
+    X = CuArray(rand(Float32, 8, 8))
+    @eval stale_f(x) = x .+ 1f0
+    @test Array(Base.invokelatest(jit, stale_f, X)) ≈ Array(X) .+ 1 rtol=1e-5
+    @eval stale_f(x) = x .+ 2f0
+    @test Array(Base.invokelatest(jit, stale_f, X)) ≈ Array(X) .+ 2 rtol=1e-5
+
+    @eval stale_inner(x) = x .+ 1f0
+    @eval stale_outer(x) = stale_inner(x) .* 2f0
+    @test Array(Base.invokelatest(jit, stale_outer, X)) ≈ (Array(X) .+ 1) .* 2 rtol=1e-5
+    @eval stale_inner(x) = x .+ 3f0
+    @test Array(Base.invokelatest(jit, stale_outer, X)) ≈ (Array(X) .+ 3) .* 2 rtol=1e-5
+
+    # an unchanged world replays the cached plan
+    nr = length(cuDNN.handle().plans)
+    Base.invokelatest(jit, stale_outer, X)
+    @test length(cuDNN.handle().plans) == nr
+end
+
+@testset "graph and bindings accessors" begin
+    # Stiletto.graph + Stiletto.bindings split c(args...) into its halves:
+    # binding preparation (the argument→tensor mapping the trace declared)
+    # and execution, so callers can schedule execute! themselves
+    A, B = CuArray(rand(Float32, 32, 16)), CuArray(rand(Float32, 16, 8))
+    c = compile((a, b) -> max.(a * b, 0f0), A, B)
+    g = Stiletto.graph(c)
+    @test g isa cuDNN.Graph
+    binds, outs = Stiletto.bindings(c, A, B)
+    @test length(outs) == 1
+    cuDNN.execute!(g, binds)
+    @test Array(outs[1]) ≈ max.(Array(A) * Array(B), 0f0) rtol=1e-2 atol=1e-2
+
+    # rebinding: fresh arguments, same graph
+    A2 = CuArray(rand(Float32, 32, 16))
+    binds2, outs2 = Stiletto.bindings(c, A2, B)
+    cuDNN.execute!(g, binds2)
+    @test Array(outs2[1]) ≈ max.(Array(A2) * Array(B), 0f0) rtol=1e-2 atol=1e-2
+
+    # in-place destinations appear in the outputs, backed by the caller buffer
+    C = CuArray(zeros(Float32, 32, 8))
+    cm = compile((c, a, b) -> mul!(c, a, b), C, A, B)
+    bm, om = Stiletto.bindings(cm, C, A, B)
+    @test om[1] === C
+    cuDNN.execute!(Stiletto.graph(cm), bm)
+    @test Array(C) ≈ Array(A) * Array(B) rtol=1e-2 atol=1e-2
+end
+
 @testset "macros" begin
     f(a, b) = a * b .+ 1f0
     A, B = CuArray(rand(Float32, 16, 16)), CuArray(rand(Float32, 16, 16))
@@ -928,6 +1094,7 @@ end
                                            CuArray(rand(Float32, 8, 4)), CuArray(rand(Float32, 8, 1)))
 end
 include("corpus.jl")
+include("microscaling.jl")
 
 
 end

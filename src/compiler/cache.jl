@@ -50,9 +50,35 @@ different cached plan.
 """
 function jit(f::F, args...; kwargs...) where {F}
     fkey = ntuple(i -> capture_key(getfield(f, i)), fieldcount(F))
-    key = (:jit, F, fkey, values(kwargs))
+    key = (:jit, F, fkey, values(kwargs), trace_epoch(f, args...))
     return cached_compile(key, f, args...; kwargs...)(args...)
 end
+
+# A cached graph is exactly as valid as the native code of the traced call
+# it was recorded from: the trace is f executed on traced stand-ins, so any
+# method redefinition that would change the trace — of f or of anything it
+# calls — also caps that code's CodeInstance. Its identity is therefore the
+# staleness epoch: a fresh instance keys a fresh trace, and stale entries
+# die with the handle's plan pool. `precompile` materializes the instance
+# before the first trace; if none is inferable (fully dynamic call), fall
+# back to the world counter — coarse, but never stale.
+function trace_epoch(f, args...)
+    world = Base.get_world_counter()
+    ts = map(traced_argtype, args)
+    mi = CompilerCaching.method_instance(f, Tuple{ts...}; world)
+    mi === nothing && return world
+    native = CacheView{Nothing}(nothing, world)
+    ci = get(native, mi, nothing)
+    if ci === nothing
+        precompile(f, ts)
+        ci = get(native, mi, nothing)
+    end
+    return ci === nothing ? world : objectid(ci)
+end
+
+# what compile's stand-ins make of each argument
+traced_argtype(a) = a isa Number ? TracedArray{Float32,0} :
+                    TracedArray{eltype(a),ndims(a)}
 
 # closures from one site share a type; their captured fields tell them apart
 capture_key(v::AbstractArray) = objectid(v)

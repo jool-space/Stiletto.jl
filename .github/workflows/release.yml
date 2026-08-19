@@ -1,0 +1,21 @@
+# Copy this file to .github/workflows/release.yml in a package repo.
+# Requires the REGISTRY_DEPLOY_KEY secret (org-level, or per-repo).
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: current | patch | minor | major | x.y.z
+        type: string
+        default: current
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    uses: jool-space/registry/.github/workflows/register.yml@main
+    with:
+      bump: ${{ inputs.bump }}
+    secrets: inherit

@@ -188,9 +188,36 @@ end
         @test Float32.(Array(copy(D))) ≈ Array(xd) rtol=0.15 atol=0.15
     end
 
+    # vector outputs: every non-blocked extent is 1 — the case where cuDNN's
+    # auto-created scale tensor finds no partner axis and skips the
+    # 128-padding; declaring the scale from the destination's padded tile
+    # extents keeps it a whole (4, 128) tile
+    Kv, Mv = 32, 32
+    wv_element = Element.(randn(Float32, Kv, Mv))
+    wv_scale = Scale.(rand(Float32, Kv ÷ block, Mv) / √Kv)
+    xv_element = Element.(randn(Float32, Kv, 1))
+    xv_scale = Scale.(rand(Float32, Kv ÷ block, 1) / √Kv)
+    Wv = BlockscaledArray(f8_4x128(CuArray(wv_scale)), CuArray(wv_element))
+    Xv = BlockscaledArray(f8_4x128(CuArray(xv_scale)), CuArray(xv_element))
+    Dv = BlockscaledArray(f8_4x128(CuArray(rand(Scale, Mv ÷ block, 1))),
+                          CuArray{Element}(undef, Mv, 1))
+    cv = compile_blockscale((d, w, x) -> Stiletto.quantize!(d, w' * x), Dv, Wv, Xv)
+    if cv === nothing
+        @test_skip blockscale_claimed
+    else
+        cv(Dv, Wv, Xv)
+        yv_ref = dequant_ref(wv_element, wv_scale, block)' *
+                 dequant_ref(xv_element, xv_scale, block)
+        @test Float32.(Array(copy(Dv))) ≈ yv_ref rtol=0.15 atol=0.15
+    end
+
     # contracts surface at trace time
     @test_throws ArgumentError compile((d, w, x) -> Stiletto.quantize!(d, w' * x),
                                        CuArray(zeros(Float32, M, N)), W, X)
+    @test_throws ArgumentError compile(   # destination scales must be swizzled
+        (d, w, x) -> Stiletto.quantize!(d, w' * x),
+        BlockscaledArray(CuArray(rand(Scale, M ÷ block, N)), CuArray{Element}(undef, M, N)),
+        W, X)
     @test_throws ArgumentError compile(
         (d, w, x) -> (q = w' * x; Stiletto.quantize!(d, q); Stiletto.quantize!(d, q)),
         D, W, X)

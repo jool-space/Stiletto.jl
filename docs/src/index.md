@@ -25,6 +25,32 @@ Engine support is never faked: when cuDNN has no engine for a graph,
 compilation throws `cuDNN.UnsupportedGraphError` rather than falling back
 to a different computation.
 
+```julia
+using Stiletto, CUDA
+
+M, N, K = 640, 320, 480
+A = CUDA.randn(Float32, K, M)
+B = CUDA.randn(Float32, K, N)
+
+function matmul_epilogue(a::AbstractMatrix, b::AbstractMatrix)
+    sum(tanh.(transpose(a) * b / √K), dims=1)
+end
+
+C = @jit matmul_epilogue(A, B)   # 1×320 CuArray, 1 allocation
+
+function matmul_epilogue!(c::AbstractMatrix, a::AbstractMatrix, b::AbstractMatrix)
+    c .= matmul_epilogue(a, b)
+end
+
+@jit matmul_epilogue!(C, A, B)   # 0 allocations
+```
+
+One graph, one kernel launch: the gemm engine takes `tanh` and `/√K` as its
+pointwise epilogue and the `sum` fuses as a terminal reduction, so the only
+allocation is the output — and the in-place form writes the caller's buffer
+directly. Traced functions compose like the ordinary Julia functions they
+are.
+
 ## Compiling and executing
 
 `compile` traces once and returns a callable; `jit` compiles per argument

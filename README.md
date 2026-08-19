@@ -18,7 +18,7 @@ function matmul_epilogue(a::AbstractMatrix, b::AbstractMatrix)
     sum(tanh.(transpose(a) * b / √K), dims=1)
 end
 
-C = @jit matmul_epilogue(A, B)   # 1×32 CuArray, 1 allocation
+C = @jit matmul_epilogue(A, B)   # 1×320 CuArray, 1 allocation
 
 function matmul_epilogue!(c::AbstractMatrix, a::AbstractMatrix, b::AbstractMatrix)
     c .= matmul_epilogue(a, b)

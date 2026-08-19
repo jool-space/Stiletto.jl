@@ -29,3 +29,11 @@ end
 
 Stiletto will try to run any graph supported by cuDNN, but not all graphs will run
 due limitations of cuDNN fusion and engine selection.
+
+## Installation
+
+```julia
+using Pkg
+Registry.add(url="https://registry.jool.space")
+Pkg.add("Stiletto")
+```

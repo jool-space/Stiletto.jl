@@ -51,6 +51,14 @@ allocation is the output — and the in-place form writes the caller's buffer
 directly. Traced functions compose like the ordinary Julia functions they
 are.
 
+## Installation
+
+```julia
+using Pkg
+Registry.add(url="https://registry.jool.space")
+Pkg.add("Microscaling")
+```
+
 ## Compiling and executing
 
 `compile` traces once and returns a callable; `jit` compiles per argument

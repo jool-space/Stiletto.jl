@@ -56,7 +56,7 @@ are.
 ```julia
 using Pkg
 Registry.add(url="https://registry.jool.space")
-Pkg.add("Microscaling")
+Pkg.add("Stiletto")
 ```
 
 ## Compiling and executing

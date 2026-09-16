@@ -26,6 +26,7 @@ SpecialFunctionsExt = "SpecialFunctions"
 [compat]
 CUDACore = "6.3"
 CompilerCaching = "0.3.1, 0.4"
+LinearAlgebra = "1.11"
 Microscaling = "0.1.2"
 NNlib = "0.9.43"
 SpecialFunctions = "2"
